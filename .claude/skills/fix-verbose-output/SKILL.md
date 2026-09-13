@@ -31,11 +31,11 @@ python "${CLAUDE_SKILL_DIR}/scripts/inject_reply_shape.py" "<root>" --status --j
 
 Use `py -3` on Windows if `python` is not on PATH, and `python3` on macOS or Linux. Then:
 
-- **`first_install` is true** (no Reply shape section and no style file yet): ask the user, with AskUserQuestion, whether to add the Stop hook. One question, three options: "No, rule and style only", "Yes, 180-word budget", "Yes, a different budget" (then take the number from their answer). Skip the question under `--dry-run` and use `style`. The hook is the only lever that can refuse a reply, and the only one that changes what happens after every turn, which is why it is the user's call.
+- **`first_install` is true** (no Reply shape section, no pointer line, and no style file yet): ask the user, with AskUserQuestion, whether to add the Stop hook. One question, three options: "No, rule and style only", "Yes, 180-word budget", "Yes, a different budget" (then take the number from their answer). Skip the question under `--dry-run` and use `style`. The hook is the only lever that can refuse a reply, and the only one that changes what happens after every turn, which is why it is the user's call.
 - **`hook_present` is true**: use `hook`, so the gate is re-verified and reported as unchanged.
 - **Otherwise** (rule or style present, no hook): use `style` and do not ask again. The user already went through the first install; the report's note says how to add the hook later.
 
-A level token from the user always wins over this step.
+A level token from the user always wins over this step. If the status shows `duplicate_copy` (a full section in CLAUDE.md and the style file both present), any run at `style` or above collapses the section to a pointer; say so in the report.
 
 ## Step 2: run the installer
 
@@ -49,8 +49,8 @@ What it does, per level:
 
 | level | files | detail |
 |---|---|---|
-| rule | `CLAUDE.md` | removes lines that are only vague brevity phrases and lists each with `file:line`; appends or replaces a `## Reply shape` section from `templates/reply-shape.rule.md` |
-| style | `.claude/output-styles/reply-shape.md`, `.claude/settings.json` | writes the style with `keep-coding-instructions: true`; sets `outputStyle` to `Reply shape` if nothing else is set |
+| rule | `CLAUDE.md` | removes lines that are only vague brevity phrases and lists each with `file:line`; at `rule` level with no style installed, appends or replaces a `## Reply shape` section from `templates/reply-shape.rule.md` |
+| style | `.claude/output-styles/reply-shape.md`, `.claude/settings.json`, `CLAUDE.md` | writes the style with `keep-coding-instructions: true`; sets `outputStyle` to `Reply shape` if nothing else is set; collapses any Reply shape section in CLAUDE.md to a one-line pointer so the rules have exactly one copy |
 | hook | `.claude/hooks/gate_length.py`, `.claude/settings.json` | installs the Stop hook with the budget; appends to `hooks.Stop` without touching other hooks or permissions; runs it with a long, a short, and a second-pass payload |
 | plugin | `<plugin-dir>/` | manifest, `hooks/hooks.json` using `${CLAUDE_PLUGIN_ROOT}`, the hook, the style, a README with the rule |
 
@@ -80,6 +80,7 @@ Do not paste the script output verbatim and do not restate what each lever is; t
 
 - Do not weaken or remove an existing hook, deny rule, or output style. The script appends; so do you.
 - Do not install the Stop hook without the user choosing it, through the level token or the first-install question.
+- Do not keep the same rules in CLAUDE.md and in the output style. One copy: the style when it is installed, CLAUDE.md otherwise. Two agreeing copies are what `/instruction-audit` reports as duplicated steering, and they turn into a conflict the moment one is edited.
 - Do not add `double-check` or `verify your reply` lines anywhere; those are the class Opus 5 over-obeys.
 - Do not resolve a `be concise` line by bolding it, repeating it, or moving it; delete it and let the shape rule stand.
 - Do not edit `~/.claude/` unless the user asked for a user-level install; this skill works at project scope.

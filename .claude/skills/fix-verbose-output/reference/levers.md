@@ -10,7 +10,7 @@ From "Opus 5: How to Fix Verbose Output" (Gábor Mészáros, Reporails), with th
 
 | lever | where it lands | can it refuse | reach for it when |
 |---|---|---|---|
-| CLAUDE.md rule | a user message after the system prompt, every session | no | a human should read the rule too |
+| CLAUDE.md rule | a user message after the system prompt, every session | no | a human should read the rule too, and no output style carries it yet |
 | output style | appended to the system prompt; Claude Code re-reminds the model of it during the session | no | you want the model leaning terser by default |
 | Stop hook (optional) | a script the harness runs when the turn ends; exit 2 sends the reply back | yes | you want a floor on length the model cannot talk past |
 | plugin | bundles style and hook | no (it carries them) | you are tired of setting the others up in every repo |
@@ -33,6 +33,14 @@ The three real levers are one move underneath: they decide what the model is hol
 One caveat: a short confirmation is already the answer. `Done.` or `Yes, that works.` should not be tabulated. The rule is about shape when there is something to shape; the template carries that as a sixth line.
 
 Even this tight, a CLAUDE.md line is advice competing with everything else the model holds. Write it, but do not expect it to hold on its own. The installer appends it at the end of the file, because the later rule wins under recency, and deletes the vague lines it replaces so there is no competing instruction on the same subject.
+
+The installer writes the full section only at `rule` level. Once the output style exists, CLAUDE.md carries a one-line pointer to it instead:
+
+```
+Reply shape is set by the `Reply shape` output style (`.claude/output-styles/reply-shape.md`); edit the rules there.
+```
+
+The article's levers are a ladder, not layers: the style is a stronger delivery of the same instruction, so a second copy in CLAUDE.md adds no strength. It does add cost. The same lines are paid for twice on every turn, `/instruction-audit` reports them as duplicated steering, and the moment one copy is edited the two become a same-subject pair that disagrees, which the CLAUDE.md copy wins under recency because it loads after the system prompt. The pointer keeps the rule findable for humans without a second copy.
 
 ## 2. The output style
 

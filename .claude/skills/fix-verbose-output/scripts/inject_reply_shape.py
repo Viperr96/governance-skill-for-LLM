@@ -6,8 +6,9 @@ up to the level asked for:
 
   rule    a "Reply shape" section in CLAUDE.md that names the shape, replacing
           vague brevity lines ("Be concise. No preamble.") that name nothing
-  style   the same rules as an output style in .claude/output-styles/, selected
-          through the outputStyle setting so it rides in the system prompt
+  style   the rules as an output style in .claude/output-styles/, selected
+          through the outputStyle setting so it rides in the system prompt;
+          CLAUDE.md then carries a one-line pointer, not a second copy
   hook    (optional) a Stop hook in .claude/hooks/ that sends an over-long reply
           back once, wired into .claude/settings.json without touching other hooks
   plugin  a plugin directory that bundles the style and the hook for reuse
@@ -74,6 +75,10 @@ BULLET = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+")
 EMPH = re.compile(r"(\*\*|__|`|\*|_)")
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 SECTION_TITLE = re.compile(r"^reply\s+shape$", re.I)
+# One copy of the rules. At style level and above they live in the output style and
+# CLAUDE.md carries this pointer for humans instead of a second copy.
+POINTER = "Reply shape is set by the `Reply shape` output style (`.claude/output-styles/reply-shape.md`); edit the rules there."
+POINTER_RE = re.compile(r"reply\s+shape.*output\s+style", re.I)
 
 
 def read(path: str) -> str:
@@ -187,7 +192,8 @@ def find_section(lines: List[str]) -> Optional[Tuple[int, int, int]]:
     return None
 
 
-def install_rule(root: str, rep: Report) -> None:
+def install_rule(root: str, rep: Report, pointer: bool) -> None:
+    """Full section at rule level; a one-line pointer once the output style is the copy."""
     template = read(os.path.join(TEMPLATES, "reply-shape.rule.md")).rstrip("\n").split("\n")
     candidates = [os.path.join(root, "CLAUDE.md"), os.path.join(root, ".claude", "CLAUDE.md")]
     existing = [p for p in candidates if os.path.isfile(p)]
@@ -195,6 +201,9 @@ def install_rule(root: str, rep: Report) -> None:
     target = rel(root, path)
 
     if not existing:
+        if pointer:
+            rep.act("rule", target, "absent; nothing to point from (the rules live in the output style)")
+            return
         write(path, "\n".join(template) + "\n", rep.dry)
         rep.act("rule", target, "created with the Reply shape section")
         return
@@ -216,28 +225,50 @@ def install_rule(root: str, rep: Report) -> None:
     lines = kept
 
     sec = find_section(lines)
-    block = list(template)
-    if sec:
-        start, end, level = sec
-        block[0] = "#" * level + " " + STYLE_NAME
-        current = [l for l in lines[start:end] if l.strip()]
-        wanted = [l for l in block if l.strip()]
-        if current == wanted:
-            rep.act("rule", target, "Reply shape section already present; unchanged")
-        else:
+    pointer_at = next((i for i, l in enumerate(lines) if POINTER_RE.search(l) and not HEADING.match(l)), None)
+
+    if pointer:
+        if sec:
+            start, end, _ = sec
             tail = lines[end:]
-            lines = lines[:start] + block + ([""] if tail and tail[0].strip() else []) + tail
-            rep.act("rule", "%s:%d" % (target, start + 1), "replaced the existing Reply shape section")
+            lines = lines[:start] + [POINTER] + ([""] if tail and tail[0].strip() else []) + tail
+            rep.act("rule", "%s:%d" % (target, start + 1), "collapsed the Reply shape section to a pointer; the rules now live only in the output style")
+            changed = True
+        elif pointer_at is not None:
+            rep.act("rule", target, "pointer to the output style already present; unchanged")
+        else:
+            while lines and not lines[-1].strip():
+                lines.pop()
+            lines = lines + ["", POINTER] if lines else [POINTER]
+            rep.act("rule", target, "added a one-line pointer to the output style (no second copy of the rules)")
             changed = True
     else:
-        while lines and not lines[-1].strip():
-            lines.pop()
-        lines = lines + ["", ""] + block if lines else block
-        rep.act("rule", target, "appended the Reply shape section at the end (the later rule wins under recency)")
-        changed = True
+        block = list(template)
+        if pointer_at is not None and not sec:
+            del lines[pointer_at]
+            rep.act("rule", "%s:%d" % (target, pointer_at + 1), "removed the pointer line; the full section replaces it")
+            changed = True
+        if sec:
+            start, end, level = sec
+            block[0] = "#" * level + " " + STYLE_NAME
+            current = [l for l in lines[start:end] if l.strip()]
+            wanted = [l for l in block if l.strip()]
+            if current == wanted:
+                rep.act("rule", target, "Reply shape section already present; unchanged")
+            else:
+                tail = lines[end:]
+                lines = lines[:start] + block + ([""] if tail and tail[0].strip() else []) + tail
+                rep.act("rule", "%s:%d" % (target, start + 1), "replaced the existing Reply shape section")
+                changed = True
+        else:
+            while lines and not lines[-1].strip():
+                lines.pop()
+            lines = lines + ["", ""] + block if lines else block
+            rep.act("rule", target, "appended the Reply shape section at the end (the later rule wins under recency)")
+            changed = True
 
     if changed:
-        text = "\n".join(lines).rstrip("\n") + "\n"
+        text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).rstrip("\n") + "\n"
         write(path, text, rep.dry)
 
 
@@ -417,7 +448,9 @@ def install_plugin(root: str, rep: Report, plugin_dir: str, limit: int, lang: st
         "Bundles the output style and the Stop hook from \"Opus 5: How to Fix Verbose Output\" so the setup travels across projects.\n\n"
         "Test: `claude --plugin-dir %s`\n\n"
         "Then pick `Reply shape` under /config, or add `force-for-plugin: true` to `output-styles/reply-shape.md` to apply it whenever the plugin is enabled.\n\n"
-        "Paste this into the CLAUDE.md of a project where humans should read the rule too:\n\n%s"
+        "Keep one copy of the rules. With the plugin's style selected, CLAUDE.md should carry only a pointer line, not these rules again. "
+        "In a project that does not use the plugin, `/fix-verbose-output rule` writes them into CLAUDE.md instead.\n\n"
+        "For reference, the rules the style carries:\n\n%s"
     ) % (rel(root, plugin_dir) or ".", rule)
     files = [
         (os.path.join(plugin_dir, ".claude-plugin", "plugin.json"), manifest, False),
@@ -439,10 +472,12 @@ def status(root: str) -> dict:
     candidates = [os.path.join(root, "CLAUDE.md"), os.path.join(root, ".claude", "CLAUDE.md")]
     claude_md = next((p for p in candidates if os.path.isfile(p)), None)
     rule_present = False
+    pointer_present = False
     vague: List[Dict[str, object]] = []
     if claude_md:
         lines = read(claude_md).split("\n")
         rule_present = find_section(lines) is not None
+        pointer_present = any(POINTER_RE.search(l) and not HEADING.match(l) for l in lines)
         for idx, line in enumerate(lines, start=1):
             fully, partly = is_vague_line(line)
             if fully or partly:
@@ -471,6 +506,7 @@ def status(root: str) -> dict:
         "root": root,
         "claude_md": rel(root, claude_md) if claude_md else None,
         "rule_present": rule_present,
+        "pointer_present": pointer_present,
         "vague_lines": vague,
         "style_present": style_present,
         "output_style": settings.get("outputStyle"),
@@ -479,7 +515,8 @@ def status(root: str) -> dict:
         "hook_wired": hook_wired,
         "hook_present": hook_file and hook_wired,
         "plugin_present": plugin_present,
-        "first_install": not rule_present and not style_present,
+        "duplicate_copy": rule_present and style_present,
+        "first_install": not rule_present and not pointer_present and not style_present,
     }
 
 
@@ -491,7 +528,14 @@ def status_markdown(st: dict) -> str:
         "",
         "| component | present |",
         "|---|---|",
-        "| Reply shape section in %s | %s |" % (st["claude_md"] or "CLAUDE.md (missing)", yes(st["rule_present"])),
+        "| Reply shape in %s | %s |"
+        % (
+            st["claude_md"] or "CLAUDE.md (missing)",
+            "full section AND output style (duplicate; run --level style to collapse)" if st["duplicate_copy"]
+            else "full section" if st["rule_present"]
+            else "pointer to the output style" if st["pointer_present"]
+            else "no",
+        ),
         "| vague brevity lines | %d (%d removable) |" % (len(st["vague_lines"]), sum(1 for v in st["vague_lines"] if v["removable"])),
         "| output style file | %s |" % yes(st["style_present"]),
         "| outputStyle in settings.json | %s |" % (st["output_style"] or "unset"),
@@ -535,7 +579,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     rep = Report(root, args.level, args.dry_run)
     depth = LEVELS.index(args.level)
 
-    install_rule(root, rep)
+    style_exists = os.path.isfile(os.path.join(root, ".claude", "output-styles", "reply-shape.md"))
+    if depth == 0 and style_exists:
+        rep.notes.append("The output style already carries the rules, so CLAUDE.md keeps a pointer instead of a second copy. Delete the style first if you want the rules in CLAUDE.md only.")
+    install_rule(root, rep, pointer=depth >= 1 or style_exists)
     if depth >= 1:
         install_style(root, rep, args.force)
     hook_path = None

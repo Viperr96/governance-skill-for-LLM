@@ -1,0 +1,90 @@
+# What each check measures
+
+Source of the method: three articles by Gábor Mészáros (Reporails) on Opus 5 instruction behavior, plus the Claude Code memory and hooks docs. Each check is a property of the text with a definite answer; none needs a model run.
+
+## bloat
+
+Measures the share of words that sit inside a directive (a rule) versus everything else: headings, prose that describes, code fences, tables, tree diagrams, descriptive lists. Across ~30,000 public repositories only ~27% of an instruction file is instruction.
+
+Flags:
+- Always-on file over the line budget (default 200). Longer files cost context every turn and reduce adherence.
+- Sections whose heading reads like documentation the agent can derive from the repository: project structure, tech stack, dependencies, architecture, overview. This is what `/doctor` trims.
+- Directory tree diagrams.
+- Files that are more than a third fenced code.
+- Lists where most items describe rather than instruct.
+
+Fix: cut derivable content. Keep pitfalls, rationale, and conventions that differ from the tool default. Move procedures to skills and path-specific rules to `.claude/rules/` with a `paths:` list.
+
+## specificity
+
+A rule binds when it names the construct it is about. `Format with ruff format before committing` is followed at roughly a 10.9x odds ratio over `keep the code clean`. On Opus 5 a vague rule fires on unrelated tasks, and the model fills the gap with its own judgment.
+
+Flags:
+- warn: a vague term (clean, proper, appropriate, best practices, careful, high quality, as needed, ...) with no concrete token (code span, path, file, identifier, tool, number with unit, constant, quoted literal, naming scheme, named technology).
+- info: no vague term but also no concrete token or domain noun.
+
+Fix: name the tool, path, pattern, or number. Or delete the rule.
+
+## inverted
+
+Rule classes that the Opus 5 generation over-obeys or that stopped helping.
+
+| class | why | fix |
+|---|---|---|
+| verification | the model verifies its own work by default; these lines cause over-verification | delete; use a held-out test or hook instead |
+| hedge (`be conservative`, `only report high-severity`) | followed literally; the model under-reports | ask for everything, filter in a second pass |
+| thinking (`think step by step`, `do not think`) | written for older models; effort lives in settings | delete unless measured |
+| effort / budgets in prose | belong in settings; a 4.8 value stays live on Opus 5 | re-run an effort sweep |
+| brevity-no-shape (`be concise`) | names nothing to bind to | reply-shape rule, output style, or Stop hook |
+| model-vintage | mentions an older model | re-test on the current model |
+| emphasis (CAPS, bold, !!) | emphasis never resolves a conflict or a vague rule | remove; check conflicts on the same subject |
+
+## placement
+
+A rule loads where it applies. A rule about `src/payments/` on the always-on surface taxes every unrelated turn and, on Opus 5, fires there.
+
+Flags:
+- A rule on an always-on surface (root CLAUDE.md, unscoped `.claude/rules`, user CLAUDE.md, `.cursorrules`, copilot instructions) that names an existing directory or a glob.
+- Skills and agents without a `description`, or with a description over 1536 characters (the listing truncates there).
+- SKILL.md over 500 lines (move reference material into linked files).
+
+Fix: `.claude/rules/<topic>.md` with `paths: ["<dir>/**"]`, or `<dir>/CLAUDE.md`, which loads only when the agent reads files there.
+
+## conflicts
+
+Two rules that cannot both hold do not average out. The model commits to one and drops the other, silently. Position decides: the rule read later governs (about a 90-point swing in a controlled experiment when one rule moved from top to bottom). Opus 5 commits harder than 4.x, so the run-to-run flakiness that used to expose a conflict is gone.
+
+The script narrows candidates deterministically:
+- both rules touch the same subject (tests, mocks, dependencies, git, formatting, types, comments, docs, errors, logging, verbosity, questions, scope, files, secrets, performance, naming, imports, async, database, api, ui, subagents, verification, planning, language, security, build, commands, editing, completion), and
+- they have opposite polarity, or one carries an exception marker, or they name exclusive alternatives (npm vs pnpm, tabs vs spaces, jest vs vitest, ...).
+
+Co-load classes:
+- always: both always on for the same tool. Severity error when the pair scores high.
+- on-demand: one lives in a nested CLAUDE.md, a path-scoped rule, a skill, or an agent. The conflict exists only on those turns.
+- cross-tool: different tools (`.cursorrules` vs `CLAUDE.md`). Drift rather than a co-load conflict, unless `CLAUDE.md` imports the other file.
+
+Recency winner: the rule with the higher load rank, then the later position. Load order used: output styles, user CLAUDE.md, user rules, project CLAUDE.md and other root files, CLAUDE.local.md, unscoped project rules, nested CLAUDE.md (deeper later), path-scoped rules, skills and agents. Inside a file, a later line wins. An `@import` is inlined at the import line.
+
+The judgment the script cannot make: whether the two rules can both hold for one concrete task. Answer that per pair. Where they cannot, fix by deleting one, or by writing one rule with an explicit exception placed after the general rule and scoped to a path. Never by bolding, repeating, or reordering.
+
+## enforcement
+
+Prompts steer; hooks enforce. A rule shaped like a gate (never force-push, do not edit `migrations/`, run tests before commit, reply under 180 words, ask before installing) is still only steering unless a hook or permission rule backs it. A model upgrade never retires a gate.
+
+Flags:
+- warn: enforcement-shaped rule with no matching hook or permission rule in `.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`, and no git pre-commit hook for step-before-commit rules.
+- info: enforcement-shaped rule that a hook or deny rule possibly covers. Confirm the gate covers the exact case.
+- error: a hook whose command points at a script that does not exist, or a settings file that does not parse.
+
+| rule class | lever |
+|---|---|
+| destructive command | `permissions.deny` `Bash(<pattern>)`, or a PreToolUse hook on Bash |
+| protected path | `permissions.deny` `Edit(<glob>)` and `Write(<glob>)`, or a PreToolUse hook on Edit and Write |
+| protected branch | deny `Bash(git push*main*)` plus remote branch protection |
+| step before commit | a git pre-commit hook (pre-commit, husky, lefthook), or a PreToolUse hook matching `git commit` |
+| step after edit | a PostToolUse hook on Edit and Write |
+| secrets | deny `Read(./.env)` and friends, plus a pre-commit secret scanner |
+| length cap | a Stop hook counting words in `last_assistant_message`, exit 2 to send the reply back |
+| approval gate | `permissions.ask`, or a PreToolUse hook returning `permissionDecision: ask` |
+
+`/instruction-enforce` generates these from templates.

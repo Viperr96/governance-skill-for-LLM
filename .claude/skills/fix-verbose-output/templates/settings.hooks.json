@@ -1,0 +1,15 @@
+{
+  "outputStyle": "Reply shape",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PROJECT_DIR}/.claude/hooks/gate_length.py\""
+          }
+        ]
+      }
+    ]
+  }
+}

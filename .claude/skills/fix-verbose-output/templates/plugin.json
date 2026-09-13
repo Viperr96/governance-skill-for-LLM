@@ -1,0 +1,9 @@
+{
+  "name": "reply-shape",
+  "version": "0.1.0",
+  "description": "Answer-first reply shape: output style, CLAUDE.md rule, and a Stop hook that sends over-long replies back",
+  "author": {
+    "name": ""
+  },
+  "keywords": ["output-style", "hooks", "verbosity", "opus-5"]
+}

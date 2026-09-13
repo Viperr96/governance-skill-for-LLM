@@ -1,0 +1,8 @@
+{
+  "name": "instruction-governance",
+  "version": "0.1.0",
+  "description": "Reply-shape output style, reply length gate, and deny-pattern hook for coding agents",
+  "author": {
+    "name": ""
+  }
+}

@@ -4,28 +4,86 @@ Four Claude Code skills, built from the approaches in `approaches.md`, that chec
 
 | skill | run it when | what it does |
 |---|---|---|
+| `/fix-verbose-output [path] [rule\|style\|hook\|plugin]` | Claude talks too much and `Be concise` in CLAUDE.md does nothing | Injects the verbose-output article's setup in one go: replaces vague brevity lines with a `Reply shape` rule, adds the output style and selects it, and on the first install asks whether to add the optional length-gating Stop hook. Can bundle it all as a plugin. Every changed line is listed. |
 | `/instruction-audit [path] [fix]` | you want a health check of every instruction file, or after a model upgrade | Runs a deterministic checker (bloat, vague rules, Opus 5 inverted classes, misplaced rules, conflict candidates, ungated enforcement, broken hooks), then judges only what the text cannot settle. `fix` applies the edits and shows before/after. |
 | `/instruction-conflicts [path] [fix]` | the agent ignores a rule that is in the file, or follows it inconsistently | Groups every rule by subject across all files, tests each same-subject pair for "can both hold at once", names the winner under recency, proposes one resolution per conflict. |
 | `/instruction-enforce <behavior>` | a rule must hold no matter what (length floor, forbidden command, protected path, step before commit) | Picks the weakest lever that holds (rule, output style, deny rule, hook, plugin) and generates it from templates, merging into `settings.json` without clobbering existing hooks. |
-| `/fix-verbose-output [path] [rule\|style\|hook\|plugin]` | Claude talks too much and `Be concise` in CLAUDE.md does nothing | Injects the verbose-output article's setup in one go: replaces vague brevity lines with a `Reply shape` rule, adds the output style and selects it, and on the first install asks whether to add the optional length-gating Stop hook. Can bundle it all as a plugin. Every changed line is listed. |
 
 ## Install
 
-Project-level: the skills already live in `.claude/skills/` here. Copy that folder into any repository.
+This repository is a plugin marketplace. Add it once, install the plugin, and all four skills load in every project on this machine:
 
-User-level, so they work in every project on this machine:
+```
+/plugin marketplace add Viperr96/governance-skill-for-LLM
+/plugin install instruction-governance@opus5-governance
+```
+
+The same two steps from a terminal, outside a session:
+
+```
+claude plugin marketplace add Viperr96/governance-skill-for-LLM
+claude plugin install instruction-governance@opus5-governance
+```
+
+`/plugin` on its own opens the browser, where the plugin can be enabled or disabled per project. Add `@v1.0` to the marketplace source to pin a tag or branch. `claude plugin details instruction-governance` prints the four skills and what they cost in tokens, `claude plugin update instruction-governance` pulls a newer version, and `claude plugin uninstall instruction-governance` removes it.
+
+The skills are plain files and work without the marketplace too. Project-level: copy `.claude/skills/` into any repository. User-level:
 
 ```
 # PowerShell
-Copy-Item -Recurse .claude\skills\instruction-*, .claude\skills\fix-verbose-output $HOME\.claude\skills\
+Copy-Item -Recurse .claude\skills\fix-verbose-output, .claude\skills\instruction-* $HOME\.claude\skills\
 
 # bash
-cp -r .claude/skills/instruction-* .claude/skills/fix-verbose-output ~/.claude/skills/
+cp -r .claude/skills/fix-verbose-output .claude/skills/instruction-* ~/.claude/skills/
 ```
 
-The three `instruction-*` skills ship as a set: `instruction-conflicts` and `instruction-enforce` call the checker script inside `instruction-audit/scripts/`. `fix-verbose-output` is self-contained and can be copied on its own.
+`fix-verbose-output` is self-contained and can be taken on its own. The three `instruction-*` skills ship as a set: `instruction-conflicts` and `instruction-enforce` call the checker script inside `instruction-audit/scripts/`.
 
 ## Examples
+
+### Fix verbose output
+
+```
+/fix-verbose-output
+```
+
+Installs the levers from "Opus 5: How to Fix Verbose Output" into the current project. It deletes any `Be concise` / `No preamble` line from `CLAUDE.md`, writes the reply-shape rules once as `.claude/output-styles/reply-shape.md` with `outputStyle` set in `.claude/settings.json`, and leaves a one-line pointer in `CLAUDE.md` so a human can find them. `rule` alone puts the full section in `CLAUDE.md` instead. The rules never live in both places; two copies are the duplicated steering `/instruction-audit` flags, and they drift into a conflict as soon as one is edited. On the first install in a project it asks one question: add the Stop hook, or not. Saying yes installs `.claude/hooks/gate_length.py`, wires it into `hooks.Stop` next to whatever hooks are already there, and runs it once with a long, a short, and a second-pass payload before the skill reports. Saying no leaves the hook out; later runs do not ask again, and `/fix-verbose-output hook` adds it whenever you want the floor.
+
+```
+/fix-verbose-output rule
+/fix-verbose-output style
+/fix-verbose-output hook --limit 120
+/fix-verbose-output plugin
+/fix-verbose-output C:\work\shop-api --dry-run
+```
+
+Levels are cumulative, weakest first, and a level token skips the question. `rule` only touches `CLAUDE.md`; `plugin` also builds `reply-shape-plugin/` for `claude --plugin-dir`. `--dry-run` reports without writing; `--force` overwrites a style or hook that already exists.
+
+The report it comes back with after a yes to the hook:
+
+```
+**Verdict:** installed 3 lever(s) (rule, style, hook) in `C:\work\shop-api`; 2 vague brevity line(s) removed
+
+| lever | target | action |
+|---|---|---|
+| rule | `CLAUDE.md:4` | removed vague brevity line: - Be concise. No preamble. |
+| rule | `CLAUDE.md` | added a one-line pointer to the output style (no second copy of the rules) |
+| style | `.claude/output-styles/reply-shape.md` | created |
+| style | `.claude/settings.json outputStyle` | set to 'Reply shape' |
+| hook | `.claude/hooks/gate_length.py` | created |
+| hook | `.claude/settings.json hooks.Stop` | added the length gate (180-word budget); other hooks kept |
+| self-test | `.claude/hooks/gate_length.py` | 372-word reply exit 2 ok; short reply exit 0 ok; second pass (stop_hook_active) exit 0 ok |
+```
+
+Running it again changes nothing; every row reads "already present; unchanged". The installer is a stdlib Python script and runs on its own too:
+
+```
+python .claude/skills/fix-verbose-output/scripts/inject_reply_shape.py . --status
+python .claude/skills/fix-verbose-output/scripts/inject_reply_shape.py . --level hook --limit 180 --dry-run
+python .claude/skills/fix-verbose-output/scripts/inject_reply_shape.py . --level plugin --json
+```
+
+`--status` prints what is already installed and whether this counts as a first install; the skill uses it to decide whether to ask about the hook.
 
 ### Health check of a project
 
@@ -132,50 +190,6 @@ Each picks the weakest lever that holds: a `permissions.deny` entry for the firs
 
 Forces a lever when the default is not what you want; here a PreToolUse hook (`templates/deny_patterns.py`) instead of a deny rule, useful when the pattern needs a regex.
 
-### Fix verbose output
-
-```
-/fix-verbose-output
-```
-
-Installs the levers from "Opus 5: How to Fix Verbose Output" into the current project: the `Reply shape` section in `CLAUDE.md` (deleting any `Be concise` / `No preamble` line it replaces) and the same rules as `.claude/output-styles/reply-shape.md` with `outputStyle` set in `.claude/settings.json`. On the first install in a project it asks one question: add the Stop hook, or not. Saying yes installs `.claude/hooks/gate_length.py`, wires it into `hooks.Stop` next to whatever hooks are already there, and runs it once with a long, a short, and a second-pass payload before the skill reports. Saying no leaves the hook out; later runs do not ask again, and `/fix-verbose-output hook` adds it whenever you want the floor.
-
-```
-/fix-verbose-output rule
-/fix-verbose-output style
-/fix-verbose-output hook --limit 120
-/fix-verbose-output plugin
-/fix-verbose-output C:\work\shop-api --dry-run
-```
-
-Levels are cumulative, weakest first, and a level token skips the question. `rule` only touches `CLAUDE.md`; `plugin` also builds `reply-shape-plugin/` for `claude --plugin-dir`. `--dry-run` reports without writing; `--force` overwrites a style or hook that already exists.
-
-The report it comes back with after a yes to the hook:
-
-```
-**Verdict:** installed 3 lever(s) (rule, style, hook) in `C:\work\shop-api`; 2 vague brevity line(s) removed
-
-| lever | target | action |
-|---|---|---|
-| rule | `CLAUDE.md:4` | removed vague brevity line: - Be concise. No preamble. |
-| rule | `CLAUDE.md` | appended the Reply shape section at the end (the later rule wins under recency) |
-| style | `.claude/output-styles/reply-shape.md` | created |
-| style | `.claude/settings.json outputStyle` | set to 'Reply shape' |
-| hook | `.claude/hooks/gate_length.py` | created |
-| hook | `.claude/settings.json hooks.Stop` | added the length gate (180-word budget); other hooks kept |
-| self-test | `.claude/hooks/gate_length.py` | 372-word reply exit 2 ok; short reply exit 0 ok; second pass (stop_hook_active) exit 0 ok |
-```
-
-Running it again changes nothing; every row reads "already present; unchanged". The installer is a stdlib Python script and runs on its own too:
-
-```
-python .claude/skills/fix-verbose-output/scripts/inject_reply_shape.py . --status
-python .claude/skills/fix-verbose-output/scripts/inject_reply_shape.py . --level hook --limit 180 --dry-run
-python .claude/skills/fix-verbose-output/scripts/inject_reply_shape.py . --level plugin --json
-```
-
-`--status` prints what is already installed and whether this counts as a first install; the skill uses it to decide whether to ask about the hook.
-
 ### After a model upgrade
 
 ```
@@ -247,7 +261,20 @@ repos:
 ## Layout
 
 ```
+.claude-plugin/
+  marketplace.json                  # the marketplace entry: /plugin marketplace add
+  plugin.json                       # the plugin manifest; its skills path points at .claude/skills/
 .claude/skills/
+  fix-verbose-output/
+    SKILL.md
+    scripts/inject_reply_shape.py     # the installer: rule, style, hook, plugin, self-test
+    reference/levers.md               # the article's four levers with the Claude Code details
+    templates/reply-shape.rule.md     # the CLAUDE.md section
+    templates/reply-shape.style.md    # the output style
+    templates/gate_length.py          # Stop hook, Python (default)
+    templates/gate-length.sh          # Stop hook, the article's bash original (needs jq)
+    templates/settings.hooks.json     # settings.json fragment
+    templates/plugin.json, hooks.json # plugin manifest and hook wiring
   instruction-audit/
     SKILL.md
     scripts/audit_instructions.py     # the deterministic checker
@@ -263,16 +290,6 @@ repos:
     templates/reply-shape.md          # output style
     templates/settings.hooks.json     # settings.json fragment to merge
     templates/plugin.json             # plugin manifest
-  fix-verbose-output/
-    SKILL.md
-    scripts/inject_reply_shape.py     # the installer: rule, style, hook, plugin, self-test
-    reference/levers.md               # the article's four levers with the Claude Code details
-    templates/reply-shape.rule.md     # the CLAUDE.md section
-    templates/reply-shape.style.md    # the output style
-    templates/gate_length.py          # Stop hook, Python (default)
-    templates/gate-length.sh          # Stop hook, the article's bash original (needs jq)
-    templates/settings.hooks.json     # settings.json fragment
-    templates/plugin.json, hooks.json # plugin manifest and hook wiring
 approaches.md                         # the extracted approaches from the three source articles
 ```
 

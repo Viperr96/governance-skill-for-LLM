@@ -58,6 +58,10 @@ The script narrows candidates deterministically:
 - both rules touch the same subject (tests, mocks, dependencies, git, formatting, types, comments, docs, errors, logging, verbosity, questions, scope, files, secrets, performance, naming, imports, async, database, api, ui, subagents, verification, planning, language, security, build, commands, editing, completion), and
 - they have opposite polarity, or one carries an exception marker, or they name exclusive alternatives (npm vs pnpm, tabs vs spaces, jest vs vitest, ...).
 
+Polarity is `pos` (a modal such as must/always/only, or a leading imperative verb), `neg` (never/do not/without, which wins over a positive modal in the same sentence), `mixed` (a positive modal and a negation together), or `neutral` (a plain declarative with neither). Only `pos` against `neg` counts as opposite. A question is never a party to a conflict; it states no obligation. `only` inside `read-only` or `append-only` is not a modal. An exception marker is a construction (except, unless, but not, optional, as needed), not a bare `can` or `may`.
+
+Severity `error` needs semantic evidence: exclusive alternatives, or opposite polarity plus enough shared terms and co-load. Shared vocabulary and the fact that two always-on files exist never reach `error` on their own; those pairs stay `warn`. When one file `@import`s the other, the note says so: the pair is one authored unit split across files, which is a reason to read them together rather than a reason to suspect them.
+
 Co-load classes:
 - always: both always on for the same tool. Severity error when the pair scores high.
 - on-demand: one lives in a nested CLAUDE.md, a path-scoped rule, a skill, or an agent. The conflict exists only on those turns.

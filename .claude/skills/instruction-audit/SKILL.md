@@ -25,6 +25,7 @@ python "${CLAUDE_SKILL_DIR}/scripts/audit_instructions.py" "<root>" --rules --js
 
 - Use `py -3` on Windows if `python` is not on PATH, and `python3` on macOS or Linux.
 - Pass `--no-user` through when the user gave it.
+- Skills installed from a plugin or marketplace (`docx`, `pptx`, `xlsx`, and other bundles the user did not write; a `license:` key in the SKILL.md frontmatter or a LICENSE file beside it is the usual sign) are not the user's to edit. Pass `--exclude ".claude/skills/<name>/**"` once per such skill so their findings do not crowd the report.
 - If the script is missing, stop and report the expected path. Do not reimplement the checks by hand.
 - Read the markdown it prints in full. The Surfaces table lists every file the audit covers; the findings carry `file:line`.
 

@@ -38,7 +38,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CHECKS = ["bloat", "specificity", "inverted", "placement", "conflicts", "enforcement"]
 
 SKIP_DIRS = {
@@ -114,9 +114,9 @@ IMPORT_RE = re.compile(r"(?<![\w`@/])@((?:~|\.{1,2})?/?[\w][\w./~-]*)")
 CODE_SPAN_RE = re.compile(r"`[^`]*`")
 
 MODAL_RE = re.compile(
-    r"\b(?:must|should|shall|never|always|do not|don'?t|dont|avoid|prefer|required|prohibited|forbidden|only|"
+    r"\b(?:must|should|shall|never|always|do not|don'?t|dont|avoid|prefer|required|prohibited|forbidden|"
     r"need to|needs to|has to|have to|make sure|ensure|be sure|not allowed|not permitted|instead of|rather than|"
-    r"unless|except)\b", re.I)
+    r"unless|except)\b|(?<![-\w])only\b", re.I)
 LEAD_CLAUSE_RE = re.compile(
     r"^(?:when|if|before|after|for|unless|while|once|whenever|in|on|during|until|to)\b[^,]{0,90},\s*(.*)$", re.I)
 IMPERATIVE_VERBS = set("""
@@ -311,7 +311,9 @@ SUBJECTS = {
     "build": r"\b(?:build|compile|bundle|ci|pipeline|deploy(?:ment)?|release|production|prod)\b",
     "commands": r"\b(?:run|execute|commands?|scripts?|shell|bash|terminal|powershell)\b",
     "editing": r"\b(?:edit(?:s|ing)?|modify|modification|overwrite|rewrite|touch|generated files?|hand-edit)\b",
-    "completion": r"\b(?:done|finished|complete|completion|stop when|report (?:back|completion)|declare|claim)\b",
+    "completion": r"\b(?:done|finished|complete|completion|stop when|report (?:back|completion)|declare|"
+                  r"claim(?:s|ed|ing)? (?:that )?(?:it'?s |it is |this is |the \w+ is )?(?:done|complete|finished|"
+                  r"fixed|working|resolved))\b",
 }
 SUBJECT_RES = {k: re.compile(v, re.I) for k, v in SUBJECTS.items()}
 BROAD_SUBJECTS = {"commands", "editing", "files", "verbosity", "build", "questions"}
@@ -343,13 +345,15 @@ NEG_RE = re.compile(
     r"\b(?:never|don'?t|do not|avoid|no\b|not\b|without|skip|except|unless|exempt|instead of|prohibited|forbidden|"
     r"must not|should not|shouldn'?t|mustn'?t|can'?t|cannot|isn'?t (?:needed|required)|not (?:needed|required|"
     r"necessary)|ships without|does not need|doesn'?t need|no need|stop\b)\b", re.I)
+# 'only' is guarded so it does not fire inside read-only, append-only, write-only.
 POS_RE = re.compile(
-    r"\b(?:always|must|should|every|all|each|required|ensure|make sure|be sure|need to|needs to|have to|has to|"
-    r"only)\b", re.I)
+    r"\b(?:always|must|should|every|all|each|required|ensure|make sure|be sure|need to|needs to|have to|has to)\b"
+    r"|(?<![-\w])only\b", re.I)
+# Exception *constructions* only. Bare modals (may, can) and adverbs (only, automatically) are how ordinary prose
+# is written and carried no signal: they fired on nearly every pair in prose-heavy files.
 EXC_RE = re.compile(
-    r"\b(?:except|unless|exempt|only|but not|ships without|does not need|doesn'?t need|no need|skip|allowed to|"
-    r"may\b|can\b|is fine|are fine|ok to|okay to|optional|automatically|whatever (?:it|they) needs?|"
-    r"what (?:it|they) needs?|on its own|by itself|without asking|as needed|when needed)\b", re.I)
+    r"\b(?:except|unless|exempt|but not|ships without|does not need|doesn'?t need|no need|allowed to|"
+    r"is fine|are fine|ok to|okay to|optional|without asking|as needed|when needed)\b", re.I)
 ALT_GROUPS = [
     ["npm", "pnpm", "yarn", "bun"],
     ["tabs", "spaces"],
@@ -508,7 +512,7 @@ class Surface:
 
 class Rule:
     __slots__ = ("surface", "line", "text", "raw", "heading", "form", "pos", "subjects", "polarity", "exc",
-                 "strong", "domain", "vague", "index")
+                 "interrogative", "strong", "domain", "vague", "index")
 
     def __init__(self, surface, line, text, raw, heading, form):
         self.surface = surface
@@ -519,8 +523,9 @@ class Rule:
         self.form = form
         self.pos = surface.base_tuple + (line,)
         self.subjects = set()
-        self.polarity = "pos"
+        self.polarity = "neutral"
         self.exc = False
+        self.interrogative = False
         self.strong = []
         self.domain = False
         self.vague = []
@@ -689,20 +694,21 @@ def strip_md(s):
     return s.strip()
 
 
+def leading_imperative(t):
+    """True when the sentence (after an optional lead-in clause) opens with an imperative verb or 'No <thing>'."""
+    m = LEAD_CLAUSE_RE.match(t)
+    t2 = m.group(1) if m else t
+    first = re.split(r"[\s,:;(]", t2, maxsplit=1)[0].lower().strip("*_`\"'()[]")
+    return first in IMPERATIVE_VERBS or bool(NO_PREFIX_RE.match(t2))
+
+
 def is_directive(sentence):
     t = strip_md(sentence)
     if not t:
         return False
     if MODAL_RE.search(t):
         return True
-    m = LEAD_CLAUSE_RE.match(t)
-    t2 = m.group(1) if m else t
-    first = re.split(r"[\s,:;(]", t2, maxsplit=1)[0].lower().strip("*_`\"'()[]")
-    if first in IMPERATIVE_VERBS:
-        return True
-    if NO_PREFIX_RE.match(t2):
-        return True
-    return False
+    return leading_imperative(t)
 
 
 def is_doc_item(text):
@@ -850,8 +856,16 @@ def classify_rule(r):
             r.subjects.add(name)
     neg = bool(NEG_RE.search(t))
     pos = bool(POS_RE.search(t))
-    r.polarity = "neg" if neg and not pos else ("mixed" if neg and pos else "pos")
+    if neg and pos:
+        r.polarity = "mixed"
+    elif neg:
+        r.polarity = "neg"
+    elif pos or leading_imperative(t):
+        r.polarity = "pos"
+    else:
+        r.polarity = "neutral"  # a declarative with no modal and no imperative: not an obligation
     r.exc = bool(EXC_RE.search(t))
+    r.interrogative = t.rstrip().endswith("?")
 
 
 # ================================================================ settings / hooks
@@ -1080,8 +1094,16 @@ def alt_hits(text):
     return hits
 
 
+def authored_unit(s):
+    """The root of an @import chain: CLAUDE.md and the files it imports are one deliberately split contract."""
+    while s.importer is not None:
+        s = s.importer
+    return s
+
+
 def check_conflicts(surfaces, F, max_pairs):
-    rules = [r for s in surfaces for r in s.rules if r.subjects]
+    # A question states no obligation and cannot contradict one; checklist items stay in the specificity check.
+    rules = [r for s in surfaces for r in s.rules if r.subjects and not r.interrogative]
     for i, r in enumerate(rules):
         r.index = i
     by_subject = defaultdict(list)
@@ -1124,6 +1146,7 @@ def check_conflicts(surfaces, F, max_pairs):
                     reasons.append("exclusive alternatives: %s vs %s" % alts[0])
                 if score == 0:
                     continue
+                semantic = score  # polarity + exception + alternatives, before the lexical and structural points
                 if sub in BROAD_SUBJECTS and score < 3 and len(shared) < 2:
                     continue
                 overlap = content_overlap(a.text, b.text)
@@ -1142,8 +1165,9 @@ def check_conflicts(surfaces, F, max_pairs):
                 if key in pairs and pairs[key]["score"] >= score:
                     continue
                 winner = a if (a.surface.rank, a.pos) > (b.surface.rank, b.pos) else b
-                pairs[key] = {"a": a, "b": b, "score": score, "reasons": reasons, "subjects": sorted(shared),
-                              "co": co, "winner": winner, "alts": bool(alts)}
+                pairs[key] = {"a": a, "b": b, "score": score, "semantic": semantic, "reasons": reasons,
+                              "subjects": sorted(shared), "co": co, "winner": winner, "alts": bool(alts),
+                              "same_unit": authored_unit(a.surface) is authored_unit(b.surface)}
     ranked = []
     seen_per_rule = defaultdict(int)
     for p in sorted(pairs.values(), key=lambda p: (-p["score"], p["a"].surface.rel, p["a"].line)):
@@ -1158,7 +1182,9 @@ def check_conflicts(surfaces, F, max_pairs):
         a, b, w = p["a"], p["b"], p["winner"]
         if p["co"] in ("cross-tool", "separate-invocations", "same-procedure"):
             sev = "info"
-        elif p["co"] == "always" and (p["alts"] or p["score"] >= 5):
+        elif p["co"] == "always" and (p["alts"] or (p["semantic"] >= 2 and p["score"] >= 5)):
+            # error needs semantic evidence (opposite polarity or exclusive alternatives); the lexical and
+            # structural points alone can reach 5 on any two prose files and are not a contradiction
             sev = "error"
         else:
             sev = "warn"
@@ -1169,7 +1195,10 @@ def check_conflicts(surfaces, F, max_pairs):
             why_win = "loads later (%s after %s)" % (w.surface.kind, (a if w is b else b).surface.kind)
         else:
             why_win = "later in load order"
-        co_note = {"always": "both always on", "on-demand": "co-load only when the on-demand surface is active",
+        always_note = "both always on"
+        if p["same_unit"] and a.surface is not b.surface:
+            always_note += "; one authored unit split by @import"
+        co_note = {"always": always_note, "on-demand": "co-load only when the on-demand surface is active",
                    "cross-tool": "different tools; drift, not a co-load conflict",
                    "separate-invocations": "two on-invocation surfaces; a conflict only when both are invoked in "
                                            "one session",
@@ -1181,7 +1210,8 @@ def check_conflicts(surfaces, F, max_pairs):
               "Decide whether both can hold for one concrete task. If not: delete one, or rewrite as one rule with "
               "an explicit exception placed after the general rule and scoped to a path. Do not fix by bolding or "
               "reordering.", other_file=b.surface.rel, other_line=b.line, other_text=b.text, winner=w.loc,
-              subjects=p["subjects"], co_load=p["co"], score=p["score"])
+              subjects=p["subjects"], co_load=p["co"], score=p["score"], semantic=p["semantic"],
+              same_unit=p["same_unit"])
 
 
 def check_enforcement(surfaces, F, settings, root):

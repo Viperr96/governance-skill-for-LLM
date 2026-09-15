@@ -209,6 +209,8 @@ python .claude/skills/instruction-audit/scripts/audit_instructions.py . --only c
 python .claude/skills/instruction-audit/scripts/audit_instructions.py . --list
 ```
 
+Its regression tests run with `python -m unittest discover -s tests` from `.claude/skills/instruction-audit/`. They pin two fixture projects: a prose-heavy `CLAUDE.md` that `@import`s a knowledge file and must produce no conflict errors, and a pair of files with four real contradictions that must all stay errors.
+
 It does not run a model. The same input gives the same output every time, which is the point: whether a rule names a construct, contradicts another, or loads where it applies are properties of the text, and asking the model to grade them is asking a stochastic judge a question with a definite answer.
 
 Flags:
@@ -221,7 +223,7 @@ Flags:
 | `--out FILE` | write the report to a file |
 | `--no-user` | skip `~/.claude/CLAUDE.md`, `~/.claude/rules/`, and user settings |
 | `--include "docs/prompts/*.md"` | audit extra files (system prompts kept elsewhere) |
-| `--exclude "**/vendor-rules/**"` | skip files matching a glob |
+| `--exclude "**/vendor-rules/**"` | skip files matching a glob; use it for skills installed from a plugin or marketplace that you do not maintain |
 | `--max-lines 150` | change the line budget for always-on files (default 200) |
 | `--fail-on warn` | exit 1 on warnings or errors (default `none`) |
 
@@ -280,6 +282,7 @@ repos:
     scripts/audit_instructions.py     # the deterministic checker
     reference/checks.md               # what each check measures and why
     reference/rule-writing.md         # the three-line rule shape, rewrite patterns, symptom table
+    tests/test_conflicts.py           # regression tests for the conflicts check, with two fixture projects
   instruction-conflicts/
     SKILL.md
   instruction-enforce/

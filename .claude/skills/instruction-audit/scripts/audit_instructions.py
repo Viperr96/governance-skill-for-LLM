@@ -38,7 +38,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CHECKS = ["bloat", "specificity", "inverted", "placement", "conflicts", "enforcement"]
 
 SKIP_DIRS = {
@@ -267,8 +267,12 @@ SUBJECTS = {
     "mocks": r"\b(?:mocks?|mocking|stubs?|fakes?|spies|spy|fixtures?|monkeypatch)\b",
     "dependencies": r"\b(?:dependenc(?:y|ies)|packages?|libraries|library|install(?:s|ing|ation|ed)?|npm i(?:nstall)?|"
                     r"pip install|node_modules|requirements\.txt|package\.json|pyproject)\b",
-    "git": r"\b(?:commits?|committing|push(?:es|ing)?|branch(?:es)?|rebase|merge|squash|pull requests?|PRs?|git|"
-           r"force[- ]push|main branch|master branch)\b",
+    # 'push back' is argument, not version control; 'merge the datasets' is data work, not a branch merge
+    "git": r"\b(?:commits?|committing|push(?:es|ing|ed)?\b(?!\s+back\b)|branch(?:es)?|rebase|"
+           r"merge(?:s|d)?\b(?!\s+(?:(?:the|a|an|two|both|these|those|multiple|all|several|your|our)\s+){0,2}"
+           r"(?:data|datasets?|tables?|frames?|dataframes?|rows|columns|cells|files?|results?|dicts?|lists?|"
+           r"arrays?|records?|sources?|sets?)\b)|squash|pull requests?|PRs?|git|force[- ]push|main branch|"
+           r"master branch)\b",
     "formatting": r"\b(?:format(?:ting|ter)?|prettier|ruff|black|eslint|lint(?:ing|er)?|biome|indent(?:ation)?|"
                   r"tabs?|spaces|semicolons?|quotes|line length|code style|style guide|gofmt|rustfmt)\b",
     "types": r"\b(?:types?|typing|typed|typescript|strict mode|mypy|pyright|type annotations?|type hints?|generics?|"
@@ -283,9 +287,13 @@ SUBJECTS = {
                  r"chatty|narrat(?:e|ion))\b",
     "questions": r"\b(?:ask(?:ing)?|confirm(?:ation)?|clarif(?:y|ication|ying)|permission|approval|check in|"
                  r"before proceeding|without asking|assume|assumptions?)\b",
-    "scope": r"\b(?:scope|refactor(?:ing|s)?|unrelated|extra|beyond|only (?:change|modify|touch|edit)|"
-             r"minimal(?:ly)? (?:change|diff)|drive-by|out of scope|creep|additional (?:changes|features)|"
-             r"while you'?re (?:there|at it))\b",
+    # bare 'scope' is a homograph ('scope context', 'scope the query'); require the change-scope construction
+    "scope": r"\b(?:(?:in|within|out of|beyond|expand(?:ing|s)?|widen(?:ing|s)?|limit(?:ing|s)?|narrow(?:ing|s)?|"
+             r"grow(?:ing|s)?|creep|reduce|the|task|change|pr) scope|scope (?:creep|of (?:the|this|a) (?:task|"
+             r"change|request|pr|ticket|fix))|refactor(?:ing|s)?|unrelated|extra (?:changes?|features?|files?|"
+             r"work|refactor(?:ing|s)?|cleanup)|beyond (?:what|the (?:task|request|ask|ticket)|that)|"
+             r"only (?:change|modify|touch|edit)|minimal(?:ly)? (?:change|diff)|drive-by|creep|"
+             r"additional (?:changes|features)|while you'?re (?:there|at it))\b",
     "files": r"\b(?:new files?|create files?|creating files?|delete files?|remove files?|rename|file names?|"
              r"filenames?|file (?:size|length)|one file|per file|single file)\b",
     "secrets": r"\b(?:secrets?|credentials?|tokens?|api keys?|passwords?|\.env|env vars?|environment variables?|"
@@ -354,6 +362,19 @@ POS_RE = re.compile(
 EXC_RE = re.compile(
     r"\b(?:except|unless|exempt|but not|ships without|does not need|doesn'?t need|no need|allowed to|"
     r"is fine|are fine|ok to|okay to|optional|without asking|as needed|when needed)\b", re.I)
+# A trailing subordinate clause ('push back when the conclusion is not supported', 'pull rows only when a
+# distribution is required') carries its own negation or modal. That token states the *condition*, not the
+# directive, so polarity is read on the main clause only. Everything else keeps reading the whole sentence.
+SUBORD_RE = re.compile(
+    r"[,;:]?\s+(?:when|whenever|if|where|while|unless|until|before|after|as soon as|because|so that|in case)\b",
+    re.I)
+
+
+def main_clause(t):
+    """The part of a sentence that states the directive: lead-in clause and trailing subordinate clause removed."""
+    m = LEAD_CLAUSE_RE.match(t)
+    t2 = m.group(1) if m else t
+    return SUBORD_RE.split(t2, 1)[0]
 ALT_GROUPS = [
     ["npm", "pnpm", "yarn", "bun"],
     ["tabs", "spaces"],
@@ -714,6 +735,19 @@ def head_verb(t):
     return first if first in IMPERATIVE_VERBS else ""
 
 
+PROHIBIT_RE = re.compile(r"^(?:never|do not|don'?t|dont|avoid|stop)\s+", re.I)
+
+
+def prohibited_verb(t):
+    """The verb a sentence forbids: 'Never run X' -> 'run'. '' when no leading never/do not/avoid precedes the
+    head verb: 'Push the tag, not the branch.' commands push, it does not prohibit it."""
+    m = LEAD_CLAUSE_RE.match(t)
+    t2 = (m.group(1) if m else t).lstrip("*_`\"'()[] ")
+    if not PROHIBIT_RE.match(t2):
+        return ""
+    return head_verb(t2)
+
+
 def is_directive(sentence):
     t = strip_md(sentence)
     if not t:
@@ -866,8 +900,9 @@ def classify_rule(r):
     for name, rx in SUBJECT_RES.items():
         if rx.search(low):
             r.subjects.add(name)
-    neg = bool(NEG_RE.search(t))
-    pos = bool(POS_RE.search(t))
+    head = main_clause(t)  # a negation or modal inside a 'when' / 'only when' clause is a condition, not a directive
+    neg = bool(NEG_RE.search(head))
+    pos = bool(POS_RE.search(head))
     if neg and pos:
         r.polarity = "mixed"
     elif neg:
@@ -1169,9 +1204,11 @@ def check_conflicts(surfaces, F, max_pairs):
                     score += 2
                     reasons.append("opposite polarity")
                 elif pol == {"imperative", "neg"}:
-                    # a bare imperative contradicts a prohibition only when both bind the same verb
-                    hv = head_verb(a.text)
-                    if hv and hv == head_verb(b.text):
+                    # a bare imperative contradicts a prohibition only when the neg side actually prohibits the
+                    # verb the imperative commands; a same-verb sentence negated elsewhere is not a prohibition
+                    imp, pro = (a, b) if a.polarity == "imperative" else (b, a)
+                    hv = head_verb(imp.text)
+                    if hv and hv == prohibited_verb(pro.text):
                         score += 2
                         reasons.append("'%s' is both commanded and prohibited" % hv)
                 if a.exc != b.exc:

@@ -209,7 +209,7 @@ python .claude/skills/instruction-audit/scripts/audit_instructions.py . --only c
 python .claude/skills/instruction-audit/scripts/audit_instructions.py . --list
 ```
 
-Its regression tests run with `python -m unittest discover -s tests` from `.claude/skills/instruction-audit/`. They pin three fixture projects: a prose-heavy `CLAUDE.md` that `@import`s a knowledge file and must produce no conflict errors, a pair of files with four real contradictions that must all stay errors, and a single `CLAUDE.md` with four adjacent contradictions that must yield exactly two errors and score the same when split across an `@import`.
+Its regression tests run with `python -m unittest discover -s tests` from `.claude/skills/instruction-audit/`. They pin three fixture projects: a prose-heavy `CLAUDE.md` that `@import`s a knowledge file and must produce no conflict findings (it carries the same positive instruction twice with a negation in its `when` clause, and two rules that share only the homograph `scope`), a pair of files with four real contradictions that must all stay errors, and a single `CLAUDE.md` with four adjacent contradictions that must yield exactly two errors and score the same when split across an `@import`.
 
 It does not run a model. The same input gives the same output every time, which is the point: whether a rule names a construct, contradicts another, or loads where it applies are properties of the text, and asking the model to grade them is asking a stochastic judge a question with a definite answer.
 

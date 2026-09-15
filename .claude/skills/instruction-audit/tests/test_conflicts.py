@@ -160,6 +160,68 @@ class Polarity(unittest.TestCase):
         self.assertFalse(self.classify("A claim can accumulate confirmations.").exc)
         self.assertTrue(self.classify("Run the linter, except on generated files.").exc)
 
+    # v1.3.0: polarity is read on the main clause. A negation or modal inside a trailing `when` / `only when`
+    # clause states the condition, not the directive (defect I).
+    def test_negation_in_a_conditional_clause_is_not_a_prohibition(self):
+        self.assertEqual(
+            self.classify("Push back when the conclusion is not supported by the data.").polarity, "imperative")
+
+    def test_modal_in_a_conditional_clause_is_not_an_obligation(self):
+        self.assertEqual(
+            self.classify("Pull row-level data only when a distribution is required, and scope it tightly.").polarity,
+            "imperative")
+
+    def test_main_clause_negation_is_still_a_prohibition(self):
+        self.assertEqual(self.classify("Do not ship the report when the check is green.").polarity, "neg")
+        self.assertEqual(self.classify("When the check is red, do not ship the report.").polarity, "neg")
+        self.assertEqual(self.classify("Never ship unless the tests pass.").polarity, "neg")
+
+    def test_main_clause_modal_is_still_an_obligation(self):
+        self.assertEqual(self.classify("Always run the full test suite before every commit.").polarity, "pos")
+        self.assertEqual(self.classify("If the data does not support it, always push back.").polarity, "pos")
+
+    # v1.3.0: the imperative/neg head-verb guard needs a real prohibition of the verb (defect J).
+    def test_prohibited_verb_needs_a_leading_negation(self):
+        self.assertEqual(audit.prohibited_verb("Never push to main."), "push")
+        self.assertEqual(audit.prohibited_verb("Before a release, do not push to main."), "push")
+        self.assertEqual(audit.prohibited_verb("Push the tag, not the branch."), "")
+        self.assertEqual(audit.prohibited_verb("Push back when the data does not support it."), "")
+
+    # v1.3.0: subject lexicons need domain context for homographs (defect K).
+    def test_push_back_is_not_a_git_subject(self):
+        self.assertNotIn("git", self.classify("Push back when the data does not support it.").subjects)
+        self.assertNotIn("git", self.classify("Merge the two datasets on battle_id.").subjects)
+        self.assertIn("git", self.classify("Never push to main.").subjects)
+        self.assertIn("git", self.classify("Never merge without a review.").subjects)
+
+    def test_bare_scope_is_not_the_scope_subject(self):
+        self.assertNotIn("scope", self.classify(
+            "Do not enter by full-text search; grep strips the trust and scope context.").subjects)
+        self.assertNotIn("scope", self.classify("Pull row-level data only when required, and scope it tightly.").subjects)
+        self.assertIn("scope", self.classify("Do not expand the scope of the task.").subjects)
+        self.assertIn("scope", self.classify("Keep changes in scope; no drive-by refactoring.").subjects)
+
+
+class ConditionalClausePairs(unittest.TestCase):
+    """The two v1.2.0 survivors from a real repo: a positive instruction twice, and two rules that share only the
+    homograph `scope`. Both live in the prose-pair fixture and must stay out of the findings entirely."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.report = run("prose-pair")
+        cls.rules = {r["text"]: r for r in cls.report["rules"]}
+
+    def test_the_same_instruction_twice_is_not_a_conflict(self):
+        a = self.rules["push back when the requested conclusion is not supported by the data."]
+        self.assertEqual(a["polarity"], "imperative")
+        self.assertNotIn("git", a["subjects"])
+        self.assertEqual(conflicts(self.report, "error") + conflicts(self.report, "warn"), [])
+
+    def test_homograph_scope_is_not_a_shared_subject(self):
+        b = self.rules["Pull row-level battle data only when a within-battle distribution is required, and scope it tightly."]
+        self.assertEqual(b["polarity"], "imperative")
+        self.assertNotIn("scope", b["subjects"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 {
   "name": "instruction-governance",
   "displayName": "Instruction governance",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Four skills that check and fix the files steering a coding agent: /fix-verbose-output, /instruction-audit, /instruction-conflicts, /instruction-enforce.",
   "author": {
     "name": "Viperr96",

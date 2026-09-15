@@ -5,7 +5,7 @@ Four Claude Code skills, built from the approaches in `approaches.md`, that chec
 | skill | run it when | what it does |
 |---|---|---|
 | `/fix-verbose-output [path] [rule\|style\|hook\|plugin]` | Claude talks too much and `Be concise` in CLAUDE.md does nothing | Injects the verbose-output article's setup in one go: replaces vague brevity lines with a `Reply shape` rule, adds the output style and selects it, and on the first install asks whether to add the optional length-gating Stop hook. Can bundle it all as a plugin. Every changed line is listed. |
-| `/instruction-audit [path] [fix]` | you want a health check of every instruction file, or after a model upgrade | Runs a deterministic checker (bloat, vague rules, Opus 5 inverted classes, misplaced rules, conflict candidates, ungated enforcement, broken hooks), then judges only what the text cannot settle. `fix` applies the edits and shows before/after. |
+| `/instruction-audit [path] [fix]` | you want a health check of every instruction file, or after a model upgrade | Runs a deterministic checker (bloat, vague rules, Opus 5 inverted classes, misplaced rules, conflict candidates, ungated enforcement, broken hooks, rules that send the model to a skill `skillOverrides` switched off), then judges only what the text cannot settle. `fix` applies the edits and shows before/after. |
 | `/instruction-conflicts [path] [fix]` | the agent ignores a rule that is in the file, or follows it inconsistently | Groups every rule by subject across all files, tests each same-subject pair for "can both hold at once", names the winner under recency, proposes one resolution per conflict. |
 | `/instruction-enforce <behavior>` | a rule must hold no matter what (length floor, forbidden command, protected path, step before commit) | Picks the weakest lever that holds (rule, output style, deny rule, hook, plugin) and generates it from templates, merging into `settings.json` without clobbering existing hooks. |
 
@@ -207,9 +207,10 @@ python .claude/skills/instruction-audit/scripts/audit_instructions.py . --no-use
 python .claude/skills/instruction-audit/scripts/audit_instructions.py . --json --rules > audit.json
 python .claude/skills/instruction-audit/scripts/audit_instructions.py . --only conflicts,enforcement
 python .claude/skills/instruction-audit/scripts/audit_instructions.py . --list
+python .claude/skills/instruction-audit/scripts/audit_instructions.py . --acronyms ARPU,ARPPU   # or .instruction-audit.json
 ```
 
-Its regression tests run with `python -m unittest discover -s tests` from `.claude/skills/instruction-audit/`. They pin three fixture projects: a prose-heavy `CLAUDE.md` that `@import`s a knowledge file and must produce no conflict findings (it carries the same positive instruction twice with a negation in its `when` clause, and two rules that share only the homograph `scope`), a pair of files with four real contradictions that must all stay errors, and a single `CLAUDE.md` with four adjacent contradictions that must yield exactly two errors and score the same when split across an `@import`.
+Its regression tests run with `python -m unittest discover -s tests` from `.claude/skills/instruction-audit/`. They pin six fixture projects: a prose-heavy `CLAUDE.md` that `@import`s a knowledge file and must produce no conflict findings (it carries the same positive instruction twice with a negation in its `when` clause, and two rules that share only the homograph `scope`), a pair of files with four real contradictions that must all stay errors, a single `CLAUDE.md` with four adjacent contradictions that must yield exactly two errors and score the same when split across an `@import`, a reply-shape rule against an output style that contradicts it (one warning), and a `CLAUDE.md` that names a skill `settings.json` switches off with `skillOverrides` (one error, one warning) next to the same project with the override removed (nothing). Bold list headers and domain acronyms have their own tests against the `emphasis` class.
 
 It does not run a model. The same input gives the same output every time, which is the point: whether a rule names a construct, contradicts another, or loads where it applies are properties of the text, and asking the model to grade them is asking a stochastic judge a question with a definite answer.
 
@@ -226,6 +227,7 @@ Flags:
 | `--exclude "**/vendor-rules/**"` | skip files matching a glob; use it for skills installed from a plugin or marketplace that you do not maintain |
 | `--max-lines 150` | change the line budget for always-on files (default 200) |
 | `--fail-on warn` | exit 1 on warnings or errors (default `none`) |
+| `--acronyms ARPU,ARPPU` | domain acronyms the `emphasis` class must not read as shouting; `.instruction-audit.json` with `{"acronyms": [...]}` at the root makes it stick |
 
 GitHub Actions, failing the build on a hard conflict or a broken hook:
 
@@ -282,7 +284,9 @@ repos:
     scripts/audit_instructions.py     # the deterministic checker
     reference/checks.md               # what each check measures and why
     reference/rule-writing.md         # the three-line rule shape, rewrite patterns, symptom table
-    tests/test_conflicts.py           # regression tests for the conflicts check, with three fixture projects
+    tests/test_conflicts.py           # regression tests for the conflicts check
+    tests/test_inverted.py            # bold headers and domain acronyms against the emphasis class
+    tests/test_settings.py            # skillOverrides: disabled skills and the rules that name them
   instruction-conflicts/
     SKILL.md
   instruction-enforce/

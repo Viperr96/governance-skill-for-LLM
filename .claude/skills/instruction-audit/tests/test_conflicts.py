@@ -223,5 +223,28 @@ class ConditionalClausePairs(unittest.TestCase):
         self.assertNotIn("scope", b["subjects"])
 
 
+class ReplyShapePair(unittest.TestCase):
+    """v1.4.0: `verbosity` is no longer a broad subject (defect N). A CLAUDE.md reply-shape rule and an output style
+    that contradicts it share one subject and ordinary vocabulary; the broad floor made the exact pair
+    /fix-verbose-output installs unreachable. Opposite polarity plus a shared term is enough to report it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.report = run("reply-shape-pair")
+
+    def test_always_vs_never_on_reply_shape_is_a_conflict(self):
+        warns = conflicts(self.report, "warn")
+        self.assertEqual(len(warns), 1, warns)
+        self.assertEqual(warns[0]["meta"]["subjects"], ["verbosity"])
+        self.assertIn("opposite polarity", warns[0]["detail"])
+
+    def test_output_style_loses_the_recency_tie(self):
+        self.assertEqual(conflicts(self.report, "warn")[0]["meta"]["winner"], "CLAUDE.md:3")
+
+    def test_still_not_an_error(self):
+        # an output style is on-invocation, so the pair is on-demand and stays a warning
+        self.assertEqual(conflicts(self.report, "error"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -18,12 +18,14 @@ Surfaces discovered (project root and every subdirectory, minus build/vendor dir
   .github/instructions/**, .windsurfrules, .windsurf/rules/**, .clinerules(/**), .devin/rules/**,
   .roo/rules/**, .junie/guidelines.md, prompts/**/*.md|txt
   plus ~/.claude/CLAUDE.md and ~/.claude/rules/** unless --no-user
-  hooks and permissions from .claude/settings.json, .claude/settings.local.json, ~/.claude/settings.json
+  hooks, permissions and skillOverrides from .claude/settings.json, .claude/settings.local.json,
+  ~/.claude/settings.json; extra domain acronyms from --acronyms or .instruction-audit.json {"acronyms": [...]}
 
 Usage:
   python audit_instructions.py [ROOT] [--json] [--json-out FILE] [--out FILE] [--only a,b,c]
                                [--rules] [--list] [--no-user] [--include GLOB]... [--exclude GLOB]...
                                [--max-lines 200] [--max-pairs 60] [--fail-on none|warn|error]
+                               [--acronyms ARPU,ARPPU]
 
 Stdlib only. Python 3.8+. Same input, same output, every time.
 """
@@ -38,7 +40,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 CHECKS = ["bloat", "specificity", "inverted", "placement", "conflicts", "enforcement"]
 
 SKIP_DIRS = {
@@ -106,7 +108,9 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 LIST_RE = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.*)$")
 TREE_RE = re.compile(r"[├└│┌┐┘┬┴┼]|^\s*[|`]--\s")
 TABLE_RE = re.compile(r"^\s*\|")
-BOLD_LINE_RE = re.compile(r"^\s*(?:\*\*|__)[^*_]+(?:\*\*|__):?\s*$")
+# A bold header (`**Plan**`, `**Report back in this shape:**`) is scaffold. A bold sentence (`**Never commit.**`)
+# keeps its terminal punctuation inside the markers and stays a rule; the emphasis class catches it.
+BOLD_LINE_RE = re.compile(r"^\s*(?:\*\*|__)[^*_]*[^*_.!?](?:\*\*|__):?\s*$")
 LINK_ONLY_RE = re.compile(r"^\s*(?:!?\[[^\]]*\]\([^)]*\)\s*)+$|^\s*<?https?://\S+>?\s*$")
 HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 SENT_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'`(\[*_])")
@@ -324,7 +328,10 @@ SUBJECTS = {
                   r"fixed|working|resolved))\b",
 }
 SUBJECT_RES = {k: re.compile(v, re.I) for k, v in SUBJECTS.items()}
-BROAD_SUBJECTS = {"commands", "editing", "files", "verbosity", "build", "questions"}
+# `verbosity` left this set in v1.4.0: a reply-shape rule and an output style that contradict it share no second
+# subject and little vocabulary, so the floor made the exact pair /fix-verbose-output installs unreachable. Widening
+# the floor for every broad subject instead was measured and rejected (28 extra candidates on the plugin repo).
+BROAD_SUBJECTS = {"commands", "editing", "files", "build", "questions"}
 STOP_WORDS = set("""
 the a an and or of to in on for with without by at from as is are be it its this that these those all every each
 any no not never always must should shall do does don dont use using used file files code when if before after
@@ -497,6 +504,7 @@ class Surface:
         self.doc_items = 0
         self.list_items = 0
         self.error = None
+        self.disabled_by = None  # settings file whose skillOverrides sets this skill "off"
         self.base_tuple = importer.base_tuple + (import_line,) if importer else ()
         self.rank = LOAD_RANK.get(kind, 30)
         if kind == "claude-md-nested":
@@ -520,6 +528,8 @@ class Surface:
         return self.kind in ALWAYS_ON_KINDS
 
     def loads(self):
+        if self.disabled_by is not None:
+            return "never (skillOverrides off)"
         if self.kind in ("skill", "agent", "command", "output-style"):
             return "on invocation"
         if self.kind == "claude-md-nested":
@@ -857,8 +867,12 @@ def load_surface(s):
         lm = LIST_RE.match(line)
         if lm:
             flush_para()
-            s.list_items += 1
             text = lm.group(2)
+            if BOLD_LINE_RE.match(text):  # a bold header is scaffold, list marker or not
+                s.line_kinds[ln] = "scaffold"
+                last_item = None
+                continue
+            s.list_items += 1
             if is_doc_item(text):
                 s.doc_items += 1
                 s.line_kinds[ln] = "doc-item"
@@ -918,6 +932,20 @@ def classify_rule(r):
 
 
 # ================================================================ settings / hooks
+def project_acronyms(root, flag=""):
+    """Domain acronyms from --acronyms plus <root>/.instruction-audit.json {"acronyms": [...]}. Only the project
+    knows its vocabulary; two metric names in one sentence are not shouting."""
+    out = {w.strip().upper() for w in flag.split(",") if w.strip()}
+    cfg = Path(root) / ".instruction-audit.json"
+    if cfg.is_file():
+        try:
+            data = json.loads(read_text(cfg))
+            out |= {str(w).strip().upper() for w in (data.get("acronyms") or []) if str(w).strip()}
+        except Exception:
+            pass
+    return out
+
+
 def load_settings(root, include_user=True):
     files = [Path(root) / ".claude" / "settings.json", Path(root) / ".claude" / "settings.local.json"]
     if include_user:
@@ -925,6 +953,8 @@ def load_settings(root, include_user=True):
     hooks = []  # dict(event, matcher, if, command, file)
     deny, allow, ask = [], [], []
     errors = []
+    overrides = {}  # skill name -> (value, file)
+    parsed = []
     for f in files:
         if not f.is_file():
             continue
@@ -933,6 +963,14 @@ def load_settings(root, include_user=True):
         except Exception as e:
             errors.append((f, str(e)))
             continue
+        parsed.append((f, data))
+    # precedence for skillOverrides is user < project < local; `files` lists project, local, user, so read user first
+    for f, data in sorted(parsed, key=lambda fd: fd[0] != files[-1] or not include_user):
+        so = data.get("skillOverrides") or {}
+        if isinstance(so, dict):
+            for sk, val in so.items():
+                overrides[str(sk)] = (val, f)
+    for f, data in parsed:
         perms = data.get("permissions") or {}
         deny += [(x, f) for x in perms.get("deny", []) or []]
         allow += [(x, f) for x in perms.get("allow", []) or []]
@@ -950,7 +988,20 @@ def load_settings(root, include_user=True):
                     hooks.append({"event": event, "matcher": matcher, "if": h.get("if", ""),
                                   "command": h.get("command", ""), "args": h.get("args", []) or [],
                                   "type": h.get("type", "command"), "file": f})
-    return {"hooks": hooks, "deny": deny, "allow": allow, "ask": ask, "errors": errors, "files": files}
+    return {"hooks": hooks, "deny": deny, "allow": allow, "ask": ask, "errors": errors, "files": files,
+            "skill_overrides": overrides}
+
+
+def disabled_skills(settings):
+    """Skill name -> settings file, for every `skillOverrides` entry set to "off"."""
+    return {k: f for k, (val, f) in settings.get("skill_overrides", {}).items() if str(val).lower() == "off"}
+
+
+def mark_disabled(surfaces, settings):
+    off = disabled_skills(settings)
+    for s in surfaces:
+        if s.kind == "skill" and s.path.parent.name in off:
+            s.disabled_by = off[s.path.parent.name]
 
 
 def matcher_hits(matcher, tool):
@@ -1060,7 +1111,8 @@ def check_specificity(surfaces, F):
                       "Add the construct or scope it; a rule that binds nothing fires everywhere on Opus 5.")
 
 
-def check_inverted(surfaces, F):
+def check_inverted(surfaces, F, acronyms=None):
+    acronyms = ACRONYMS | set(acronyms or ())
     for s in surfaces:
         for r in s.rules:
             plain = CODE_SPAN_RE.sub(" ", r.raw)  # a phrase quoted in backticks is mentioned, not instructed
@@ -1073,7 +1125,7 @@ def check_inverted(surfaces, F):
                         continue
                     F.add("inverted", sev, s, r.line, r.text, "Class '%s'. %s" % (name, advice),
                           "Test on the current model; delete if it no longer binds.", cls=name)
-            caps = [w for w in re.findall(r"\b[A-Z]{4,}\b", r.raw) if w not in ACRONYMS]
+            caps = [w for w in re.findall(r"\b[A-Z]{4,}\b", r.raw) if w not in acronyms]
             bold_all = bool(re.match(r"^\s*(?:\*\*|__).+(?:\*\*|__)\s*[.!]?\s*$", r.raw.strip()))
             if any(w in SHOUT_WORDS for w in caps) or len(caps) >= 2 or bold_all or "!!" in r.raw:
                 F.add("inverted", "info", s, r.line, r.text,
@@ -1310,6 +1362,7 @@ def check_enforcement(surfaces, F, settings, root):
                 F.add("enforcement", "error", Surface(h["file"], "extra", root), 1, h["command"],
                       "%s hook references a script that does not exist: %s" % (h["event"], tok),
                       "Restore the script or remove the hook; a gate that is not there enforces nothing.")
+    check_dead_skills(surfaces, F, settings)
     for s in surfaces:
         procedural = s.kind in ("skill", "agent", "command", "output-style")
         for r in s.rules:
@@ -1337,6 +1390,39 @@ def check_enforcement(surfaces, F, settings, root):
                           "model can weigh it and set it aside." % name,
                           "Add %s" % lever, cls=name)
                 break
+
+
+def check_dead_skills(surfaces, F, settings):
+    """A skill that `skillOverrides` sets to "off" never loads, and a rule that sends the model to it cannot be
+    followed. Anything in settings that decides whether a surface loads belongs to an audit of what loads."""
+    off = disabled_skills(settings)
+    if not off:
+        return
+    for s in surfaces:
+        if s.disabled_by is not None:
+            F.add("enforcement", "warn", s, 1, "",
+                  "Surface is listed as loadable but `skillOverrides` sets it to \"off\" in %s, so it never loads."
+                  % Path(s.disabled_by).name, "Remove the override, or delete the skill.", cls="disabled-skill",
+                  skill=s.path.parent.name)
+            continue
+        for r in s.rules:
+            named = sorted(k for k in off if names_skill(r.text, k))
+            if not named:
+                continue
+            F.add("enforcement", "error" if s.always_on else "warn", s, r.line, r.text,
+                  "Names the skill(s) %s, which `skillOverrides` sets to \"off\" in %s. The rule cannot be followed."
+                  % (", ".join(named), Path(off[named[0]]).name),
+                  "Re-enable the skill in settings, or drop the name from the rule.", cls="dead-skill",
+                  skills=named)
+
+
+def names_skill(text, name):
+    """`polars` in a code span, or `/polars`, or the bare word in a sentence that says `skill`. The bare word alone
+    (`Use Polars when pandas is memory-bound`) names the library, not the skill."""
+    esc = re.escape(name)
+    if re.search(r"`%s`|(?<![\w/])/%s\b" % (esc, esc), text):
+        return True
+    return bool(re.search(r"\b%s\b" % esc, text)) and bool(re.search(r"\bskills?\b", text, re.I))
 
 
 # ================================================================ output
@@ -1444,6 +1530,7 @@ def to_json(root, surfaces, F, summary, only, show_rules):
             "lines": len(s.lines), "words": s.words, "instruction_words": s.instr_words, "rules": len(s.rules),
             "paths": s.frontmatter.get("paths") if s.paths_scoped else None,
             "via_import": ("%s:%d" % (s.importer.rel, s.import_line)) if s.importer else None,
+            "disabled_by": Path(s.disabled_by).name if s.disabled_by else None,
             "error": s.error,
         } for s in surfaces],
         "findings": [{k: v for k, v in f.items()} for f in F.items],
@@ -1474,6 +1561,8 @@ def main(argv=None):
     ap.add_argument("--max-pairs", type=int, default=60, help="cap on reported conflict pairs (default 60)")
     ap.add_argument("--fail-on", choices=["none", "warn", "error"], default="none",
                     help="exit 1 when findings of this severity or worse exist")
+    ap.add_argument("--acronyms", default="", metavar="A,B",
+                    help="domain acronyms that are vocabulary, not shouting (also read from .instruction-audit.json)")
     args = ap.parse_args(argv)
 
     try:
@@ -1491,20 +1580,21 @@ def main(argv=None):
         load_surface(s)
     surfaces = resolve_imports(surfaces, root)
     surfaces.sort(key=lambda s: (s.scope != "user", s.rank, s.rel))
+    settings = load_settings(root, include_user=not args.no_user)
+    mark_disabled(surfaces, settings)
 
     if args.list:
         for s in surfaces:
             print("%-14s %-22s %s%s" % (s.kind, s.loads(), s.rel, " [user]" if s.scope == "user" else ""))
         return 0
 
-    settings = load_settings(root, include_user=not args.no_user)
     F = Findings()
     if "bloat" in only:
         check_bloat(surfaces, F, args.max_lines)
     if "specificity" in only:
         check_specificity(surfaces, F)
     if "inverted" in only:
-        check_inverted(surfaces, F)
+        check_inverted(surfaces, F, project_acronyms(root, args.acronyms))
     if "placement" in only:
         check_placement(surfaces, F, root)
     if "conflicts" in only:

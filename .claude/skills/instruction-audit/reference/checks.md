@@ -39,6 +39,8 @@ Rule classes that the Opus 5 generation over-obeys or that stopped helping.
 | model-vintage | mentions an older model | re-test on the current model |
 | emphasis (CAPS, bold, !!) | emphasis never resolves a conflict or a vague rule | remove; check conflicts on the same subject |
 
+Emphasis means a shouted word (IMPORTANT, NEVER, ALWAYS, ...), a fully bold sentence, `!!`, or two or more unknown four-letter capitals in one rule. A bold header (`**Plan**`, `- **Pull**`, `2. **Report back:**`) is scaffold, with or without a list marker, and is never a rule. Domain acronyms (ARPU, ARPPU) look like shouting to a generic list; name them once with `--acronyms ARPU,ARPPU` or in `.instruction-audit.json` as `{"acronyms": ["ARPU", "ARPPU"]}` at the project root.
+
 ## placement
 
 A rule loads where it applies. A rule about `src/payments/` on the always-on surface taxes every unrelated turn and, on Opus 5, fires there.
@@ -73,6 +75,8 @@ Co-load classes:
 
 Recency winner: the rule with the higher load rank, then the later position. Load order used: output styles, user CLAUDE.md, user rules, project CLAUDE.md and other root files, CLAUDE.local.md, unscoped project rules, nested CLAUDE.md (deeper later), path-scoped rules, skills and agents. Inside a file, a later line wins. An `@import` is inlined at the import line.
 
+The rank is position, not authority. An output style is the earliest text in the context (it replaces the default system-prompt section), so under recency a CLAUDE.md rule on the same subject is read after it and wins the tie. `/fix-verbose-output` calls the style the stronger lever for a different reason: it displaces the default instructions the reply-shape rule would otherwise compete with, rather than out-ranking CLAUDE.md. Both hold; keep the two copies of a reply-shape rule identical, and this check reports them when they drift.
+
 The judgment the script cannot make: whether the two rules can both hold for one concrete task. Answer that per pair. Where they cannot, fix by deleting one, or by writing one rule with an explicit exception placed after the general rule and scoped to a path. Never by bolding, repeating, or reordering.
 
 ## enforcement
@@ -83,6 +87,8 @@ Flags:
 - warn: enforcement-shaped rule with no matching hook or permission rule in `.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`, and no git pre-commit hook for step-before-commit rules.
 - info: enforcement-shaped rule that a hook or deny rule possibly covers. Confirm the gate covers the exact case.
 - error: a hook whose command points at a script that does not exist, or a settings file that does not parse.
+- error (warn on an on-demand surface): a rule that names a skill (`` `polars` ``, `/polars`, `the polars skill`) which `skillOverrides` sets to `"off"` in a settings file. The rule cannot be followed.
+- warn: a skill under `.claude/skills/` that `skillOverrides` sets to `"off"`. The Surfaces table lists it as `never (skillOverrides off)`. Anything in settings that decides whether a surface loads belongs to an audit of what loads.
 
 | rule class | lever |
 |---|---|

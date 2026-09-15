@@ -26,6 +26,7 @@ python "${CLAUDE_SKILL_DIR}/scripts/audit_instructions.py" "<root>" --rules --js
 - Use `py -3` on Windows if `python` is not on PATH, and `python3` on macOS or Linux.
 - Pass `--no-user` through when the user gave it.
 - Skills installed from a plugin or marketplace (`docx`, `pptx`, `xlsx`, and other bundles the user did not write; a `license:` key in the SKILL.md frontmatter or a LICENSE file beside it is the usual sign) are not the user's to edit. Pass `--exclude ".claude/skills/<name>/**"` once per such skill so their findings do not crowd the report.
+- If the project's vocabulary has acronyms the `emphasis` class mistakes for shouting (two metric names in one sentence), pass `--acronyms A,B` once, or tell the user a `.instruction-audit.json` with `{"acronyms": [...]}` at the root makes it stick.
 - If the script is missing, stop and report the expected path. Do not reimplement the checks by hand.
 - Read the markdown it prints in full. The Surfaces table lists every file the audit covers; the findings carry `file:line`.
 
@@ -59,7 +60,7 @@ Keep dismissed conflict candidates to one line each. Do not paste the script out
 Only when the arguments contain `fix`.
 
 1. Apply in this order: confirmed conflicts, inverted-class deletions, vague-rule rewrites, placement moves, bloat cuts.
-2. Edit only files listed in the Surfaces table. Do not edit hook scripts, `settings.json`, permission rules, CI config, or git hooks. Gates outlive model upgrades.
+2. Edit only files listed in the Surfaces table. Do not edit hook scripts, `settings.json`, permission rules, CI config, or git hooks. Gates outlive model upgrades. A `dead-skill` finding is fixed on the rule side (drop the skill name) unless the user says to re-enable the skill; a `disabled-skill` finding is the user's call.
 3. Before deleting a rule that names a path, command, or number, confirm with Glob or Read that it is derivable or stale. Otherwise keep it.
 4. When moving a rule to `.claude/rules/<topic>.md`, write the `paths:` frontmatter and delete the original line.
 5. Re-run the script and show a before/after table: files, lines, instruction share, findings per check.

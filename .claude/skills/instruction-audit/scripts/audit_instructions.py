@@ -38,7 +38,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CHECKS = ["bloat", "specificity", "inverted", "placement", "conflicts", "enforcement"]
 
 SKIP_DIRS = {
@@ -348,7 +348,7 @@ NEG_RE = re.compile(
 # 'only' is guarded so it does not fire inside read-only, append-only, write-only.
 POS_RE = re.compile(
     r"\b(?:always|must|should|every|all|each|required|ensure|make sure|be sure|need to|needs to|have to|has to)\b"
-    r"|(?<![-\w])only\b", re.I)
+    , re.I)
 # Exception *constructions* only. Bare modals (may, can) and adverbs (only, automatically) are how ordinary prose
 # is written and carried no signal: they fired on nearly every pair in prose-heavy files.
 EXC_RE = re.compile(
@@ -702,6 +702,18 @@ def leading_imperative(t):
     return first in IMPERATIVE_VERBS or bool(NO_PREFIX_RE.match(t2))
 
 
+HEAD_NEG_RE = re.compile(r"^(?:never|do not|don'?t|dont|avoid|always|also|please)\s+", re.I)
+
+
+def head_verb(t):
+    """The imperative verb a sentence commands or prohibits: 'Never run X' -> 'run', 'Run X' -> 'run'."""
+    m = LEAD_CLAUSE_RE.match(t)
+    t2 = m.group(1) if m else t
+    t2 = HEAD_NEG_RE.sub("", t2.lstrip("*_`\"'()[] "))
+    first = re.split(r"[\s,:;(]", t2, maxsplit=1)[0].lower().strip("*_`\"'()[]")
+    return first if first in IMPERATIVE_VERBS else ""
+
+
 def is_directive(sentence):
     t = strip_md(sentence)
     if not t:
@@ -804,7 +816,7 @@ def load_surface(s):
             flush_para()
             s.line_kinds[ln] = "table"
             continue
-        if BOLD_LINE_RE.match(line) or LINK_ONLY_RE.match(line):
+        if BOLD_LINE_RE.match(line) or LINK_ONLY_RE.match(line) or re.fullmatch(r"@[\w./~-]+", stripped):
             flush_para()
             s.line_kinds[ln] = "scaffold"
             continue
@@ -860,8 +872,10 @@ def classify_rule(r):
         r.polarity = "mixed"
     elif neg:
         r.polarity = "neg"
-    elif pos or leading_imperative(t):
+    elif pos:
         r.polarity = "pos"
+    elif leading_imperative(t):
+        r.polarity = "imperative"
     else:
         r.polarity = "neutral"  # a declarative with no modal and no imperative: not an obligation
     r.exc = bool(EXC_RE.search(t))
@@ -1091,6 +1105,21 @@ def alt_hits(text):
                  if re.search(r"(?<![A-Za-z0-9_])" + re.escape(a.lower()) + r"(?![A-Za-z0-9_])", low)]
         if len(found) == 1:
             hits[gi] = found[0]
+        elif len(found) == 2:
+            # "not A; use B" / "B, not A" names both: keep the one that is not under a negation
+            kept, neg = [], False
+            for seg in re.split(r"(;|:|\binstead of\b|\brather than\b|\bnot\b|\bnever\b|\bdon'?t\b|\bdo not\b|\bavoid\b)", low):
+                if seg in (";", ":"):
+                    neg = False
+                    continue
+                if re.fullmatch(r"instead of|rather than|not|never|don'?t|do not|avoid", seg):
+                    neg = True
+                    continue
+                for a in found:
+                    if not neg and re.search(r"(?<![A-Za-z0-9_])" + re.escape(a.lower()) + r"(?![A-Za-z0-9_])", seg):
+                        kept.append(a)
+            if len(kept) == 1:
+                hits[gi] = kept[0]
     return hits
 
 
@@ -1117,8 +1146,9 @@ def check_conflicts(surfaces, F, max_pairs):
         for a_i in range(len(rs)):
             for b_i in range(a_i + 1, len(rs)):
                 a, b = rs[a_i], rs[b_i]
-                if a.surface is b.surface and abs(a.line - b.line) < 3 and a.heading == b.heading:
-                    continue
+                if (a.surface is b.surface and abs(a.line - b.line) < 3 and a.heading == b.heading
+                        and (a.exc or b.exc)):
+                    continue  # a rule and its scoped exception, written together
                 if not (a.surface.families & b.surface.families):
                     co = "cross-tool"
                 elif a.surface is b.surface and a.surface.kind in ("skill", "agent", "command"):
@@ -1131,11 +1161,19 @@ def check_conflicts(surfaces, F, max_pairs):
                 else:
                     co = "on-demand"
                 shared = a.subjects & b.subjects
+                same_unit = authored_unit(a.surface) is authored_unit(b.surface)
                 score = 0
                 reasons = []
-                if {a.polarity, b.polarity} == {"pos", "neg"}:
+                pol = {a.polarity, b.polarity}
+                if pol == {"pos", "neg"}:
                     score += 2
                     reasons.append("opposite polarity")
+                elif pol == {"imperative", "neg"}:
+                    # a bare imperative contradicts a prohibition only when both bind the same verb
+                    hv = head_verb(a.text)
+                    if hv and hv == head_verb(b.text):
+                        score += 2
+                        reasons.append("'%s' is both commanded and prohibited" % hv)
                 if a.exc != b.exc:
                     score += 1
                     reasons.append("one carries an exception")
@@ -1150,7 +1188,7 @@ def check_conflicts(surfaces, F, max_pairs):
                 if sub in BROAD_SUBJECTS and score < 3 and len(shared) < 2:
                     continue
                 overlap = content_overlap(a.text, b.text)
-                if score == 1 and not overlap and len(shared) < 2:
+                if score <= 2 and not overlap and len(shared) < 2:
                     continue
                 if overlap:
                     score += 1
@@ -1159,7 +1197,7 @@ def check_conflicts(surfaces, F, max_pairs):
                     score += 1
                 if co == "always":
                     score += 1
-                if a.surface is not b.surface:
+                if a.surface is not b.surface and not same_unit:
                     score += 1
                 key = (min(a.index, b.index), max(a.index, b.index))
                 if key in pairs and pairs[key]["score"] >= score:
@@ -1167,7 +1205,7 @@ def check_conflicts(surfaces, F, max_pairs):
                 winner = a if (a.surface.rank, a.pos) > (b.surface.rank, b.pos) else b
                 pairs[key] = {"a": a, "b": b, "score": score, "semantic": semantic, "reasons": reasons,
                               "subjects": sorted(shared), "co": co, "winner": winner, "alts": bool(alts),
-                              "same_unit": authored_unit(a.surface) is authored_unit(b.surface)}
+                              "same_unit": same_unit}
     ranked = []
     seen_per_rule = defaultdict(int)
     for p in sorted(pairs.values(), key=lambda p: (-p["score"], p["a"].surface.rel, p["a"].line)):
@@ -1182,7 +1220,7 @@ def check_conflicts(surfaces, F, max_pairs):
         a, b, w = p["a"], p["b"], p["winner"]
         if p["co"] in ("cross-tool", "separate-invocations", "same-procedure"):
             sev = "info"
-        elif p["co"] == "always" and (p["alts"] or (p["semantic"] >= 2 and p["score"] >= 5)):
+        elif p["co"] == "always" and (p["alts"] or (p["semantic"] >= 2 and p["score"] >= 4)):
             # error needs semantic evidence (opposite polarity or exclusive alternatives); the lexical and
             # structural points alone can reach 5 on any two prose files and are not a contradiction
             sev = "error"

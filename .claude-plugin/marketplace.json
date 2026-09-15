@@ -5,14 +5,14 @@
     "url": "https://github.com/Viperr96"
   },
   "description": "Instruction governance skills for LLM-driven projects: fix verbose output, audit instruction files, find conflicting rules, and enforce a behavior with the weakest lever that holds.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "plugins": [
     {
       "name": "instruction-governance",
       "source": "./",
       "displayName": "Instruction governance",
       "description": "Four skills that check and fix the files steering a coding agent: /fix-verbose-output, /instruction-audit, /instruction-conflicts, /instruction-enforce.",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "author": {
         "name": "Viperr96",
         "url": "https://github.com/Viperr96"

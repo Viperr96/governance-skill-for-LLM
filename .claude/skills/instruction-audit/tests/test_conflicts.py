@@ -75,6 +75,52 @@ class TrueConflicts(unittest.TestCase):
         self.assertTrue(all("one authored unit split by @import" in d for d in details), details)
 
 
+class SingleFile(unittest.TestCase):
+    """Four literal contradictions written into one CLAUDE.md. v1.1.0 reported nothing: adjacent rules under
+    one heading were skipped before scoring, so severity depended on how the author split the files."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.report = run("single-file")
+
+    def test_two_errors(self):
+        errors = conflicts(self.report, "error")
+        self.assertEqual(len(errors), 2, [e["detail"] for e in errors])
+
+    def test_no_warnings(self):
+        self.assertEqual(conflicts(self.report, "warn"), [])
+
+    def test_both_alternatives_in_one_sentence_are_read(self):
+        details = " || ".join(e["detail"] for e in conflicts(self.report, "error"))
+        self.assertIn("exclusive alternatives: black vs ruff format", details)
+
+    def test_import_line_is_not_glued_to_a_rule(self):
+        for r in run("true-conflicts")["rules"]:
+            self.assertNotIn("@STYLE.md", r["text"])
+
+
+class LayoutIndependence(unittest.TestCase):
+    """The same rules split across an @import must score exactly as they do in one file."""
+
+    def test_split_matches_single_file(self):
+        import tempfile
+        one = run("single-file")
+        src = (HERE / "fixtures" / "single-file" / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "CLAUDE.md").write_text("\n".join(src[:3] + [src[4], "", "@RULES.md"]) + "\n", encoding="utf-8")
+            (Path(d) / "RULES.md").write_text("\n".join([src[3], src[5]]) + "\n", encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    audit.main([d, "--json", "--no-user", "--rules"])
+                except SystemExit:
+                    pass
+            two = json.loads(buf.getvalue())
+        key = lambda f: (f["severity"], f["meta"]["score"], f["meta"]["semantic"], sorted(f["meta"]["subjects"]))
+        self.assertEqual(sorted(key(f) for f in conflicts(one, "error") + conflicts(one, "warn")),
+                         sorted(key(f) for f in conflicts(two, "error") + conflicts(two, "warn")))
+
+
 class Polarity(unittest.TestCase):
     def classify(self, text):
         s = audit.Surface(SCRIPT, "claude-md", SCRIPT.parent)
@@ -82,8 +128,27 @@ class Polarity(unittest.TestCase):
         audit.classify_rule(r)
         return r
 
-    def test_bare_imperative_is_positive(self):
-        self.assertEqual(self.classify("Ask for confirmation before editing any file under src/.").polarity, "pos")
+    def test_bare_imperative_has_its_own_polarity(self):
+        self.assertEqual(self.classify("Ask for confirmation before editing any file under src/.").polarity, "imperative")
+
+    def test_explicit_modal_is_positive(self):
+        self.assertEqual(self.classify("Always run the full test suite before every commit.").polarity, "pos")
+
+    def test_restrictive_only_is_not_a_modal(self):
+        self.assertEqual(self.classify("The external-api class verifies opportunistically only.").polarity, "neutral")
+
+    def test_head_verb_strips_negation(self):
+        self.assertEqual(audit.head_verb("Never ask for confirmation before editing files."), "ask")
+        self.assertEqual(audit.head_verb("Ask for confirmation before editing any file."), "ask")
+        self.assertEqual(audit.head_verb("Follow `knowledge/references/okf-spec.md` for format."), "follow")
+        self.assertEqual(audit.head_verb("New knowledge goes in one fragment per proposal."), "")
+
+    def test_negated_alternative_is_not_the_chosen_one(self):
+        hits = audit.alt_hits("Do not format with `black`; this repo uses `ruff format`.")
+        self.assertIn("ruff format", hits.values())
+        self.assertNotIn("black", hits.values())
+        hits = audit.alt_hits("Install dependencies with yarn, not npm.")
+        self.assertEqual(list(hits.values()), ["yarn"])
 
     def test_negated_imperative_is_negative(self):
         self.assertEqual(self.classify("Do not run the test suite before committing.").polarity, "neg")

@@ -210,7 +210,7 @@ python .claude/skills/instruction-audit/scripts/audit_instructions.py . --list
 python .claude/skills/instruction-audit/scripts/audit_instructions.py . --acronyms ARPU,ARPPU   # or .instruction-audit.json
 ```
 
-Its regression tests run with `python -m unittest discover -s tests` from `.claude/skills/instruction-audit/`. They pin six fixture projects: a prose-heavy `CLAUDE.md` that `@import`s a knowledge file and must produce no conflict findings (it carries the same positive instruction twice with a negation in its `when` clause, and two rules that share only the homograph `scope`), a pair of files with four real contradictions that must all stay errors, a single `CLAUDE.md` with four adjacent contradictions that must yield exactly two errors and score the same when split across an `@import`, a reply-shape rule against an output style that contradicts it (one warning), and a `CLAUDE.md` that names a skill `settings.json` switches off with `skillOverrides` (one error, one warning) next to the same project with the override removed (nothing). Bold list headers and domain acronyms have their own tests against the `emphasis` class.
+Its regression tests run with `python -m unittest discover -s tests` from `.claude/skills/instruction-audit/`. They pin ten fixture projects: a prose-heavy `CLAUDE.md` that `@import`s a knowledge file and must produce no conflict findings (it carries the same positive instruction twice with a negation in its `when` clause, and two rules that share only the homograph `scope`), a pair of files with four real contradictions that must all stay errors, a single `CLAUDE.md` with four adjacent contradictions that must yield exactly two errors and score the same when split across an `@import`, a reply-shape rule against an output style that contradicts it (info while the style is unselected, an error once `settings.json` selects it through `outputStyle`), a `CLAUDE.md` that names a skill `settings.json` switches off with `skillOverrides` (one error, one warning) next to the same project with the override removed (nothing), a switched-off skill whose rules must not be paired, two positive rules that name different winners for one decision (`canonical` against `takes precedence`, one error), and a skill whose overview and resource sections must yield no rules. Bold list headers and domain acronyms have their own tests against the `emphasis` class.
 
 It does not run a model. The same input gives the same output every time, which is the point: whether a rule names a construct, contradicts another, or loads where it applies are properties of the text, and asking the model to grade them is asking a stochastic judge a question with a definite answer.
 
@@ -219,8 +219,9 @@ Flags:
 | flag | effect |
 |---|---|
 | `--only bloat,conflicts` | run a subset of the six checks |
-| `--rules` | append the extracted rule inventory (subjects, polarity, concrete tokens) |
-| `--json` / `--json-out FILE` | machine-readable output, or write it alongside the markdown |
+| `--rules` | put the extracted rule inventory (subjects, polarity, concrete tokens) in the JSON; `--print-rules` also prints it as a table, which runs to hundreds of rows on a real project |
+| `--json` / `--json-out FILE` | machine-readable output, or write it alongside the markdown; `--schema` prints the key layout |
+| `--include-disabled` | pair rules from skills that `skillOverrides` switches off (never by default; such a surface never loads) |
 | `--out FILE` | write the report to a file |
 | `--no-user` | skip `~/.claude/CLAUDE.md`, `~/.claude/rules/`, and user settings |
 | `--include "docs/prompts/*.md"` | audit extra files (system prompts kept elsewhere) |

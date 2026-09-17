@@ -226,24 +226,26 @@ class ConditionalClausePairs(unittest.TestCase):
 class ReplyShapePair(unittest.TestCase):
     """v1.4.0: `verbosity` is no longer a broad subject (defect N). A CLAUDE.md reply-shape rule and an output style
     that contradicts it share one subject and ordinary vocabulary; the broad floor made the exact pair
-    /fix-verbose-output installs unreachable. Opposite polarity plus a shared term is enough to report it."""
+    /fix-verbose-output installs unreachable. Opposite polarity plus a shared term is enough to report it.
+    v1.5.0: while the style is not selected in settings it is on-demand, and a polarity clash alone is info there
+    (review 1.3); tests/fixtures/reply-shape-selected pins the selected case, which is an always-on error."""
 
     @classmethod
     def setUpClass(cls):
         cls.report = run("reply-shape-pair")
 
-    def test_always_vs_never_on_reply_shape_is_a_conflict(self):
-        warns = conflicts(self.report, "warn")
-        self.assertEqual(len(warns), 1, warns)
-        self.assertEqual(warns[0]["meta"]["subjects"], ["verbosity"])
-        self.assertIn("opposite polarity", warns[0]["detail"])
+    def test_always_vs_never_on_reply_shape_is_a_candidate(self):
+        found = conflicts(self.report, "info")
+        self.assertEqual(len(found), 1, found)
+        self.assertEqual(found[0]["meta"]["subjects"], ["verbosity"])
+        self.assertIn("opposite polarity", found[0]["detail"])
 
     def test_output_style_loses_the_recency_tie(self):
-        self.assertEqual(conflicts(self.report, "warn")[0]["meta"]["winner"], "CLAUDE.md:3")
+        self.assertEqual(conflicts(self.report, "info")[0]["meta"]["winner"], "CLAUDE.md:3")
 
-    def test_still_not_an_error(self):
-        # an output style is on-invocation, so the pair is on-demand and stays a warning
-        self.assertEqual(conflicts(self.report, "error"), [])
+    def test_not_an_error_or_a_warning_while_unselected(self):
+        # an unselected output style is on-demand; opposite polarity plus one shared word is info there
+        self.assertEqual(conflicts(self.report, "error") + conflicts(self.report, "warn"), [])
 
 
 if __name__ == "__main__":

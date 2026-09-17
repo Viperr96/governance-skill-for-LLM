@@ -28,7 +28,7 @@ python "${CLAUDE_SKILL_DIR}/scripts/audit_instructions.py" "<root>" --rules --js
 - Skills installed from a plugin or marketplace (`docx`, `pptx`, `xlsx`, and other bundles the user did not write; a `license:` key in the SKILL.md frontmatter or a LICENSE file beside it is the usual sign) are not the user's to edit. Pass `--exclude ".claude/skills/<name>/**"` once per such skill so their findings do not crowd the report.
 - If the project's vocabulary has acronyms the `emphasis` class mistakes for shouting (two metric names in one sentence), pass `--acronyms A,B` once, or tell the user a `.instruction-audit.json` with `{"acronyms": [...]}` at the root makes it stick.
 - If the script is missing, stop and report the expected path. Do not reimplement the checks by hand.
-- Read the markdown it prints in full. The Surfaces table lists every file the audit covers; the findings carry `file:line`.
+- Read the markdown it prints in full. The Surfaces table lists every file the audit covers; the findings carry `file:line`. `--rules` puts the rule inventory in the JSON only (key `rules`); do not add `--print-rules`, the table runs to hundreds of rows. `--schema` prints the JSON layout.
 
 The script does not run any model and returns the same result for the same input. Treat its numbers (instruction share, counts, which rule wins under recency) as the numbers. Do not re-score them by judgment.
 
@@ -53,7 +53,7 @@ Add what the script cannot see, using Glob and Read on the repository:
 
 Lead with the verdict in the first sentence, then the counts table from the script. Then list findings grouped by severity as bullets with `file:line`, the rule text, and the decision. End with a fix list ordered: conflicts, ungated enforcement, vague rules, inverted classes, placement, bloat.
 
-Keep dismissed conflict candidates to one line each. Do not paste the script output verbatim; the user can open the JSON.
+Group dismissed conflict candidates by reason (homograph, pointer to the rule it names, checklist steps, two skills that do not co-load, compatible rules), one line per group; list a pair on its own only when a reader might re-raise it. Do not paste the script output verbatim; the user can open the JSON.
 
 ## Step 4: fix mode
 

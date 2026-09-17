@@ -18,14 +18,16 @@ Surfaces discovered (project root and every subdirectory, minus build/vendor dir
   .github/instructions/**, .windsurfrules, .windsurf/rules/**, .clinerules(/**), .devin/rules/**,
   .roo/rules/**, .junie/guidelines.md, prompts/**/*.md|txt
   plus ~/.claude/CLAUDE.md and ~/.claude/rules/** unless --no-user
-  hooks, permissions and skillOverrides from .claude/settings.json, .claude/settings.local.json,
+  hooks, permissions, skillOverrides and outputStyle from .claude/settings.json, .claude/settings.local.json,
   ~/.claude/settings.json; extra domain acronyms from --acronyms or .instruction-audit.json {"acronyms": [...]}
 
 Usage:
   python audit_instructions.py [ROOT] [--json] [--json-out FILE] [--out FILE] [--only a,b,c]
-                               [--rules] [--list] [--no-user] [--include GLOB]... [--exclude GLOB]...
-                               [--max-lines 200] [--max-pairs 60] [--fail-on none|warn|error]
-                               [--acronyms ARPU,ARPPU]
+                               [--rules] [--print-rules] [--list] [--no-user] [--include-disabled]
+                               [--include GLOB]... [--exclude GLOB]... [--max-lines 200] [--max-pairs 60]
+                               [--fail-on none|warn|error] [--acronyms ARPU,ARPPU] [--schema]
+
+JSON layout: --schema prints it.
 
 Stdlib only. Python 3.8+. Same input, same output, every time.
 """
@@ -40,7 +42,34 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
+SCHEMA = """
+JSON written by --json / --json-out (audit_instructions.py v%s)
+
+version            checker version
+root               absolute project root
+checks             the checks that ran
+summary            surfaces, rules, words, instruction_words, instruction_share, by_check{check: {error, warn, info}},
+                   errors, warnings, infos
+surfaces[]         file, kind, scope (project | user), loads (always | on invocation | on demand (subtree) |
+                   on demand (paths) | when selected (/output-style) | always (outputStyle in <file>) |
+                   never (skillOverrides off) | unknown), always_on, lines, words, instruction_words, rules,
+                   paths (frontmatter list or null), via_import ("file:line" or null), disabled_by (settings file
+                   or null), selected_by (settings file naming this output style, or null), error
+findings[]         check, severity (error | warn | info), file, line, text, detail, fix, meta
+  meta (conflicts) other_file, other_line, other_text, winner ("file:line", "depends on invocation order", or
+                   "none"), subjects, co_load (always | on-demand | separate-invocations | same-procedure |
+                   cross-tool | disabled), score, semantic (polarity + exception + alternatives points only),
+                   same_unit (both sides in one @import chain)
+  meta (others)    cls, gate, skills, skill, vague, token, span as each check sets them
+rules[]            only with --rules: file, line, heading (" > "-joined path), text, polarity (pos | neg | mixed |
+                   imperative | neutral), exception, subjects, concrete (matched construct kinds), domain_noun,
+                   vague, load_rank
+
+Severity for a conflicts candidate: error = both always on and (exclusive alternatives, or semantic >= 2 with score
+>= 4); warn = exclusive alternatives, or semantic >= 3 with two shared terms, on an always or on-demand pair; info =
+everything else, including every pair on a separate-invocations, same-procedure, cross-tool or disabled co-load.
+""" % VERSION
 CHECKS = ["bloat", "specificity", "inverted", "placement", "conflicts", "enforcement"]
 
 SKIP_DIRS = {
@@ -144,6 +173,15 @@ fork mirror sync backup restore archive destroy drop truncate wipe erase never a
 prioritize prioritise delegate spin spawn cap treat keep
 """.split())
 NO_PREFIX_RE = re.compile(r"^no\s+\w+", re.I)
+# Sections that describe rather than instruct: an overview paragraph, a listing of the scripts a skill ships with, a
+# reading list. Nothing under these headings is a rule, whatever modal the prose happens to use.
+NON_RULE_HEADING_RE = re.compile(
+    r"^(?:overview|resources?|references?|key references?|further reading|see also|related(?: skills?)?|scripts?|"
+    r"files?|bundled (?:scripts?|files?|resources?)|assets?|examples?|changelog|credits?|license|acknowledg(?:e)?ments?)"
+    r"\s*$", re.I)
+# `scripts/power.py — unified closed-form interface`: a list item that opens with a backticked path and a dash names a
+# file, it does not instruct, however long the description runs.
+PATH_LISTING_RE = re.compile(r"^\s*`[^`]*(?:/|\.[A-Za-z0-9]{1,5})`\s*[-:—–]\s*\S")
 
 # ---------------------------------------------------------------- specificity
 STRONG_CONCRETE = [
@@ -272,7 +310,9 @@ SUBJECTS = {
     "dependencies": r"\b(?:dependenc(?:y|ies)|packages?|libraries|library|install(?:s|ing|ation|ed)?|npm i(?:nstall)?|"
                     r"pip install|node_modules|requirements\.txt|package\.json|pyproject)\b",
     # 'push back' is argument, not version control; 'merge the datasets' is data work, not a branch merge
-    "git": r"\b(?:commits?|committing|push(?:es|ing|ed)?\b(?!\s+back\b)|branch(?:es)?|rebase|"
+    # 'commit to a visual motif' is a decision, not version control; 'commit to main' / 'commit to the branch' are
+    "git": r"\b(?:commits?\b(?!\s+to\s+(?:a|an|one|this|that)\b)|committing|push(?:es|ing|ed)?\b(?!\s+back\b)|"
+           r"branch(?:es)?|rebase|"
            r"merge(?:s|d)?\b(?!\s+(?:(?:the|a|an|two|both|these|those|multiple|all|several|your|our)\s+){0,2}"
            r"(?:data|datasets?|tables?|frames?|dataframes?|rows|columns|cells|files?|results?|dicts?|lists?|"
            r"arrays?|records?|sources?|sets?)\b)|squash|pull requests?|PRs?|git|force[- ]push|main branch|"
@@ -375,6 +415,11 @@ EXC_RE = re.compile(
 SUBORD_RE = re.compile(
     r"[,;:]?\s+(?:when|whenever|if|where|while|unless|until|before|after|as soon as|because|so that|in case)\b",
     re.I)
+# 'Verify no unintended circular references', 'Check that there are no orphan rows': the `no` is the thing being
+# checked for, not a prohibition. The sentence commands a check and reads as a positive imperative.
+VERIFY_NO_RE = re.compile(
+    r"^\W*(?:verify|check|ensure|confirm|assert|make sure|test|validate|be sure)\s+(?:that\s+)?"
+    r"(?:there\s+(?:is|are)\s+)?(?:no|not|nothing|none)\b", re.I)
 
 
 def main_clause(t):
@@ -382,6 +427,24 @@ def main_clause(t):
     m = LEAD_CLAUSE_RE.match(t)
     t2 = m.group(1) if m else t
     return SUBORD_RE.split(t2, 1)[0]
+# Two rules that each name a winner for the same decision ("X is canonical", "Y takes precedence") conflict whatever
+# their polarity. The vocabulary is small and the pair must also share a domain noun that is not this vocabulary.
+PRECEDENCE_RE = re.compile(
+    r"\b(?:canonical|source of truth|authoritative|the authority|takes? precedence|precedence|governs?|overrides?|"
+    r"wins?|trumps?|defers? to|ranks? (?:above|over|first|ahead)|(?:comes?|goes?) first|primary (?:source|copy|"
+    r"reference)|(?:master|reference) copy|copy of record|of record|prefer(?:red)?\b[^.;]{0,40}\bover\b|"
+    r"priority over|(?:if|when|where) (?:the )?(?:sources|they|the two|both|values|numbers|files|copies) "
+    r"(?:disagree|conflict|differ)|in case of (?:a )?(?:conflict|disagreement|mismatch))\b", re.I)
+PRECEDENCE_TOKENS = {"canonical", "source", "truth", "authoritative", "authority", "take", "precedence", "govern",
+                     "override", "win", "trump", "defer", "rank", "above", "first", "ahead", "come", "primary",
+                     "reference", "master", "copy", "record", "prefer", "priority", "disagree", "conflict",
+                     "differ", "case", "mismatch"}
+
+
+def precedence_terms(text):
+    return sorted({m.group(0).lower() for m in PRECEDENCE_RE.finditer(text)})
+
+
 ALT_GROUPS = [
     ["npm", "pnpm", "yarn", "bun"],
     ["tabs", "spaces"],
@@ -505,6 +568,7 @@ class Surface:
         self.list_items = 0
         self.error = None
         self.disabled_by = None  # settings file whose skillOverrides sets this skill "off"
+        self.selected_by = None  # settings file whose outputStyle names this output style
         self.base_tuple = importer.base_tuple + (import_line,) if importer else ()
         self.rank = LOAD_RANK.get(kind, 30)
         if kind == "claude-md-nested":
@@ -525,12 +589,22 @@ class Surface:
             return not self.paths_scoped
         if self.kind == "import":
             return self.importer.always_on if self.importer else True
+        if self.kind == "output-style":
+            return self.selected_by is not None  # the selected style is in the system prompt on every turn
         return self.kind in ALWAYS_ON_KINDS
+
+    @property
+    def disabled(self):
+        return self.disabled_by is not None
 
     def loads(self):
         if self.disabled_by is not None:
             return "never (skillOverrides off)"
-        if self.kind in ("skill", "agent", "command", "output-style"):
+        if self.kind == "output-style":
+            if self.selected_by is not None:
+                return "always (outputStyle in %s)" % Path(self.selected_by).name
+            return "when selected (/output-style)"
+        if self.kind in ("skill", "agent", "command"):
             return "on invocation"
         if self.kind == "claude-md-nested":
             return "on demand (subtree)"
@@ -764,6 +838,8 @@ def is_directive(sentence):
         return False
     if MODAL_RE.search(t):
         return True
+    if PRECEDENCE_RE.search(t):
+        return True  # "X is the canonical source" governs a decision without a modal
     return leading_imperative(t)
 
 
@@ -774,6 +850,8 @@ def is_doc_item(text):
         return True
     if t.endswith(":") and len(t.split()) <= 6:
         return True  # a lead-in line such as "Deploy the application:"
+    if PATH_LISTING_RE.match(text):
+        return True  # `scripts/power.py` — what the file is
     if is_directive(t):
         return False
     if re.match(r"^[`\w./*@-]+\s*[-:—–]\s*.*$", t) and len(t.split()) <= 14:
@@ -803,8 +881,14 @@ def load_surface(s):
     para = []  # (line_no, text)
     rules = []
 
+    def under_non_rule_heading():
+        return any(NON_RULE_HEADING_RE.match(h) for _, h in heading_stack)
+
     def flush_para():
         if not para:
+            return
+        if under_non_rule_heading():
+            para.clear()
             return
         start = para[0][0]
         joined = " ".join(t.strip() for _, t in para)
@@ -873,7 +957,7 @@ def load_surface(s):
                 last_item = None
                 continue
             s.list_items += 1
-            if is_doc_item(text):
+            if is_doc_item(text) or under_non_rule_heading():
                 s.doc_items += 1
                 s.line_kinds[ln] = "doc-item"
                 last_item = None
@@ -915,8 +999,11 @@ def classify_rule(r):
         if rx.search(low):
             r.subjects.add(name)
     head = main_clause(t)  # a negation or modal inside a 'when' / 'only when' clause is a condition, not a directive
+    checked = VERIFY_NO_RE.match(head)
+    if checked:
+        head = head[checked.end():]  # 'verify no X' checks for X; the `no` is not a prohibition
     neg = bool(NEG_RE.search(head))
-    pos = bool(POS_RE.search(head))
+    pos = bool(POS_RE.search(head)) and not checked
     if neg and pos:
         r.polarity = "mixed"
     elif neg:
@@ -954,6 +1041,7 @@ def load_settings(root, include_user=True):
     deny, allow, ask = [], [], []
     errors = []
     overrides = {}  # skill name -> (value, file)
+    output_style = None  # (name, file) from the highest-precedence settings file that sets outputStyle
     parsed = []
     for f in files:
         if not f.is_file():
@@ -970,6 +1058,9 @@ def load_settings(root, include_user=True):
         if isinstance(so, dict):
             for sk, val in so.items():
                 overrides[str(sk)] = (val, f)
+        style = data.get("outputStyle")
+        if isinstance(style, str) and style.strip():
+            output_style = (style.strip(), f)
     for f, data in parsed:
         perms = data.get("permissions") or {}
         deny += [(x, f) for x in perms.get("deny", []) or []]
@@ -989,7 +1080,7 @@ def load_settings(root, include_user=True):
                                   "command": h.get("command", ""), "args": h.get("args", []) or [],
                                   "type": h.get("type", "command"), "file": f})
     return {"hooks": hooks, "deny": deny, "allow": allow, "ask": ask, "errors": errors, "files": files,
-            "skill_overrides": overrides}
+            "skill_overrides": overrides, "output_style": output_style}
 
 
 def disabled_skills(settings):
@@ -1002,6 +1093,25 @@ def mark_disabled(surfaces, settings):
     for s in surfaces:
         if s.kind == "skill" and s.path.parent.name in off:
             s.disabled_by = off[s.path.parent.name]
+
+
+def style_key(name):
+    return re.sub(r"[\s_-]+", "", str(name)).lower()
+
+
+def mark_selected_style(surfaces, settings):
+    """The output style `outputStyle` names in settings is in the system prompt on every turn. It is matched by its
+    `name:` frontmatter, then by its file stem; the built-in styles (default, explanatory, learning) have no file."""
+    sel = settings.get("output_style")
+    if not sel:
+        return
+    name, f = sel
+    key = style_key(name)
+    for s in surfaces:
+        if s.kind != "output-style":
+            continue
+        if style_key(s.frontmatter.get("name") or "") == key or style_key(s.path.stem) == key:
+            s.selected_by = f
 
 
 def matcher_hits(matcher, tool):
@@ -1217,9 +1327,41 @@ def authored_unit(s):
     return s
 
 
-def check_conflicts(surfaces, F, max_pairs):
+ON_INVOCATION_KINDS = ("skill", "agent", "command")
+
+
+def co_load_class(a, b):
+    """How two rules meet in one context window."""
+    if a.surface.disabled or b.surface.disabled:
+        return "disabled"
+    if not (a.surface.families & b.surface.families):
+        return "cross-tool"
+    if a.surface is b.surface and a.surface.kind in ON_INVOCATION_KINDS:
+        return "same-procedure"
+    if a.surface is not b.surface and a.surface.kind in ON_INVOCATION_KINDS and b.surface.kind in ON_INVOCATION_KINDS:
+        return "separate-invocations"
+    if a.surface is not b.surface and a.surface.kind == "output-style" and b.surface.kind == "output-style":
+        return "separate-invocations"  # one style at a time
+    if a.surface.always_on and b.surface.always_on:
+        return "always"
+    return "on-demand"
+
+
+CO_NOTE = {
+    "always": "both always on",
+    "on-demand": "co-load only when the on-demand surface is active",
+    "cross-tool": "different tools; drift, not a co-load conflict",
+    "separate-invocations": "two on-invocation surfaces; a conflict only when both are invoked in one session",
+    "same-procedure": "steps of one on-invocation procedure; usually sequencing, not a conflict",
+    "disabled": "one side never loads (skillOverrides off); listed because --include-disabled was given",
+}
+
+
+def check_conflicts(surfaces, F, max_pairs, include_disabled=False):
     # A question states no obligation and cannot contradict one; checklist items stay in the specificity check.
-    rules = [r for s in surfaces for r in s.rules if r.subjects and not r.interrogative]
+    # A surface that never loads cannot take part in a conflict; it is paired only on request.
+    rules = [r for s in surfaces for r in s.rules
+             if not r.interrogative and (include_disabled or not s.disabled)]
     for i, r in enumerate(rules):
         r.index = i
     by_subject = defaultdict(list)
@@ -1227,6 +1369,26 @@ def check_conflicts(surfaces, F, max_pairs):
         for sub in r.subjects:
             by_subject[sub].append(r)
     pairs = {}
+
+    def structural(a, b, co, same_unit, overlap):
+        pts = 0
+        if overlap:
+            pts += 1
+        if co == "always":
+            pts += 1
+        if a.surface is not b.surface and not same_unit:
+            pts += 1
+        return pts
+
+    def record(a, b, score, semantic, reasons, subjects, co, alts, same_unit, overlap):
+        key = (min(a.index, b.index), max(a.index, b.index))
+        if key in pairs and pairs[key]["score"] >= score:
+            return
+        winner = a if (a.surface.rank, a.pos) > (b.surface.rank, b.pos) else b
+        pairs[key] = {"a": a, "b": b, "score": score, "semantic": semantic, "reasons": reasons,
+                      "subjects": subjects, "co": co, "winner": winner, "alts": alts, "same_unit": same_unit,
+                      "overlap": len(overlap)}
+
     for sub, rs in by_subject.items():
         if len(rs) < 2 or len(rs) > 400:
             continue
@@ -1236,17 +1398,9 @@ def check_conflicts(surfaces, F, max_pairs):
                 if (a.surface is b.surface and abs(a.line - b.line) < 3 and a.heading == b.heading
                         and (a.exc or b.exc)):
                     continue  # a rule and its scoped exception, written together
-                if not (a.surface.families & b.surface.families):
-                    co = "cross-tool"
-                elif a.surface is b.surface and a.surface.kind in ("skill", "agent", "command"):
-                    co = "same-procedure"
-                elif (a.surface is not b.surface and a.surface.kind in ("skill", "agent", "command")
-                      and b.surface.kind in ("skill", "agent", "command")):
-                    co = "separate-invocations"
-                elif a.surface.always_on and b.surface.always_on:
-                    co = "always"
-                else:
-                    co = "on-demand"
+                co = co_load_class(a, b)
+                if (co == "same-procedure" and a.heading == b.heading and a.form == "list" and b.form == "list"):
+                    continue  # two items of one checklist are steps, not rivals
                 shared = a.subjects & b.subjects
                 same_unit = authored_unit(a.surface) is authored_unit(b.surface)
                 score = 0
@@ -1280,21 +1434,32 @@ def check_conflicts(surfaces, F, max_pairs):
                 if score <= 2 and not overlap and len(shared) < 2:
                     continue
                 if overlap:
-                    score += 1
                     reasons.append("shared terms: %s" % ", ".join(sorted(overlap)[:3]))
+                score += structural(a, b, co, same_unit, overlap)
                 if len(shared) >= 2:
                     score += 1
-                if co == "always":
-                    score += 1
-                if a.surface is not b.surface and not same_unit:
-                    score += 1
-                key = (min(a.index, b.index), max(a.index, b.index))
-                if key in pairs and pairs[key]["score"] >= score:
-                    continue
-                winner = a if (a.surface.rank, a.pos) > (b.surface.rank, b.pos) else b
-                pairs[key] = {"a": a, "b": b, "score": score, "semantic": semantic, "reasons": reasons,
-                              "subjects": sorted(shared), "co": co, "winner": winner, "alts": bool(alts),
-                              "same_unit": same_unit}
+                record(a, b, score, semantic, reasons, sorted(shared), co, bool(alts), same_unit, overlap)
+
+    # Precedence detector: two rules that both name a winner for one decision and share a domain noun. Polarity is
+    # not consulted; "X is canonical" and "Y takes precedence" are both positive and still cannot both hold.
+    prec = [(r, precedence_terms(r.text)) for r in rules]
+    prec = [(r, terms) for r, terms in prec if terms]
+    for a_i in range(len(prec)):
+        for b_i in range(a_i + 1, len(prec)):
+            (a, ta), (b, tb) = prec[a_i], prec[b_i]
+            co = co_load_class(a, b)
+            if co in ("cross-tool", "separate-invocations", "disabled"):
+                continue
+            overlap = {w for w in content_overlap(a.text, b.text) if w not in PRECEDENCE_TOKENS}
+            if not overlap:
+                continue
+            same_unit = authored_unit(a.surface) is authored_unit(b.surface)
+            reasons = ["both name a precedence winner (%s / %s)" % (ta[0], tb[0]),
+                       "shared terms: %s" % ", ".join(sorted(overlap)[:3])]
+            score = 2 + structural(a, b, co, same_unit, overlap)
+            record(a, b, score, 2, reasons, sorted(a.subjects & b.subjects) or ["precedence"], co, False, same_unit,
+                   overlap)
+
     ranked = []
     seen_per_rule = defaultdict(int)
     for p in sorted(pairs.values(), key=lambda p: (-p["score"], p["a"].surface.rel, p["a"].line)):
@@ -1307,36 +1472,43 @@ def check_conflicts(surfaces, F, max_pairs):
             break
     for p in ranked:
         a, b, w = p["a"], p["b"], p["winner"]
-        if p["co"] in ("cross-tool", "separate-invocations", "same-procedure"):
+        if p["co"] in ("cross-tool", "separate-invocations", "same-procedure", "disabled"):
             sev = "info"
         elif p["co"] == "always" and (p["alts"] or (p["semantic"] >= 2 and p["score"] >= 4)):
             # error needs semantic evidence (opposite polarity or exclusive alternatives); the lexical and
             # structural points alone can reach 5 on any two prose files and are not a contradiction
             sev = "error"
-        else:
+        elif p["alts"] or (p["semantic"] >= 3 and p["overlap"] >= 2):
+            # warn needs more than a polarity clash: exclusive alternatives, or opposite polarity plus an exception
+            # marker plus two shared terms. Opposite polarity and one shared word is a keyword collision most of
+            # the time (`errors` in "standard error" and "Excel errors"), and lands in info for the reader to test.
             sev = "warn"
-        why = "; ".join(p["reasons"])
-        if w.surface is a.surface and w.surface is b.surface:
-            why_win = "later in the same file"
-        elif w.surface.rank != (a.surface.rank if w is b else b.surface.rank):
-            why_win = "loads later (%s after %s)" % (w.surface.kind, (a if w is b else b).surface.kind)
         else:
-            why_win = "later in load order"
-        always_note = "both always on"
-        if p["same_unit"] and a.surface is not b.surface:
-            always_note += "; one authored unit split by @import"
-        co_note = {"always": always_note, "on-demand": "co-load only when the on-demand surface is active",
-                   "cross-tool": "different tools; drift, not a co-load conflict",
-                   "separate-invocations": "two on-invocation surfaces; a conflict only when both are invoked in "
-                                           "one session",
-                   "same-procedure": "steps of one on-invocation procedure; usually sequencing, not a conflict"
-                   }[p["co"]]
+            sev = "info"
+        why = "; ".join(p["reasons"])
+        if p["co"] == "separate-invocations":
+            winner_loc, why_win = "depends on invocation order", "whichever surface is invoked later wins"
+        elif p["co"] == "cross-tool":
+            winner_loc, why_win = "none", "different tools never co-load"
+        elif p["co"] == "disabled":
+            winner_loc, why_win = "none", "a disabled surface never loads"
+        else:
+            winner_loc = w.loc
+            if w.surface is a.surface and w.surface is b.surface:
+                why_win = "later in the same file"
+            elif w.surface.rank != (a.surface.rank if w is b else b.surface.rank):
+                why_win = "loads later (%s after %s)" % (w.surface.kind, (a if w is b else b).surface.kind)
+            else:
+                why_win = "later in load order"
+        co_note = CO_NOTE[p["co"]]
+        if p["co"] == "always" and p["same_unit"] and a.surface is not b.surface:
+            co_note += "; one authored unit split by @import"
         F.add("conflicts", sev, a.surface, a.line, a.text,
               "[%s] %s. Pair: %s <-> %s. %s. Recency winner: %s (%s)." %
-              (", ".join(p["subjects"]), why, a.loc, b.loc, co_note, w.loc, why_win),
+              (", ".join(p["subjects"]), why, a.loc, b.loc, co_note, winner_loc, why_win),
               "Decide whether both can hold for one concrete task. If not: delete one, or rewrite as one rule with "
               "an explicit exception placed after the general rule and scoped to a path. Do not fix by bolding or "
-              "reordering.", other_file=b.surface.rel, other_line=b.line, other_text=b.text, winner=w.loc,
+              "reordering.", other_file=b.surface.rel, other_line=b.line, other_text=b.text, winner=winner_loc,
               subjects=p["subjects"], co_load=p["co"], score=p["score"], semantic=p["semantic"],
               same_unit=p["same_unit"])
 
@@ -1456,10 +1628,19 @@ def render_md(root, surfaces, F, summary, only, show_rules):
     L.append("")
     L.append("Deterministic read of the instruction surfaces (audit_instructions.py v%s, no model involved)." % VERSION)
     L.append("")
-    L.append("**Verdict:** %d error(s), %d warning(s), %d info across %d surface(s), %d rules; instruction share "
-             "%d%% of words (rest is scaffolding)." % (summary["errors"], summary["warnings"], summary["infos"],
-                                                      summary["surfaces"], summary["rules"],
-                                                      round(100 * summary["instruction_share"])))
+    if only == ["conflicts"]:
+        # a candidate pair is a narrowing for a reader to test, not a verdict; do not let the count read as one
+        n = summary["errors"] + summary["warnings"] + summary["infos"]
+        L.append("**Candidates:** %d pair(s) to review (%d error, %d warn, %d info) across %d surface(s), %d rules. "
+                 "Each pair is a deterministic narrowing; a conflict is confirmed only by naming one task on which "
+                 "the two rules collide." % (n, summary["errors"], summary["warnings"], summary["infos"],
+                                             summary["surfaces"], summary["rules"]))
+    else:
+        L.append("**Verdict:** %d error(s), %d warning(s), %d info across %d surface(s), %d rules; instruction "
+                 "share %d%% of words (rest is scaffolding)." % (summary["errors"], summary["warnings"],
+                                                                 summary["infos"], summary["surfaces"],
+                                                                 summary["rules"],
+                                                                 round(100 * summary["instruction_share"])))
     L.append("")
     L.append("## Surfaces")
     L.append("")
@@ -1475,6 +1656,10 @@ def render_md(root, surfaces, F, summary, only, show_rules):
         L.append("| `%s`%s%s | %s | %s | %d | %d | %d%% | %d |" %
                  (s.rel, scope, via, s.kind, s.loads(), len(s.lines), s.words, share, len(s.rules)))
     L.append("")
+    if show_rules is None:
+        L.append("The extracted rule inventory is in the JSON (`--json-out`, key `rules`); `--print-rules` prints it "
+                 "here.")
+        L.append("")
     L.append("## Summary by check")
     L.append("")
     L.append("| check | error | warn | info |")
@@ -1508,7 +1693,7 @@ def render_md(root, surfaces, F, summary, only, show_rules):
                                                           trunc(f["meta"]["other_text"])))
             L.append("  - fix: %s" % f["fix"])
         L.append("")
-    if show_rules:
+    if show_rules:  # only with --print-rules; the table runs to hundreds of rows on a real project
         L.append("## Extracted rules")
         L.append("")
         L.append("| loc | polarity | subjects | concrete | rule |")
@@ -1531,6 +1716,7 @@ def to_json(root, surfaces, F, summary, only, show_rules):
             "paths": s.frontmatter.get("paths") if s.paths_scoped else None,
             "via_import": ("%s:%d" % (s.importer.rel, s.import_line)) if s.importer else None,
             "disabled_by": Path(s.disabled_by).name if s.disabled_by else None,
+            "selected_by": Path(s.selected_by).name if s.selected_by else None,
             "error": s.error,
         } for s in surfaces],
         "findings": [{k: v for k, v in f.items()} for f in F.items],
@@ -1552,7 +1738,13 @@ def main(argv=None):
     ap.add_argument("--json-out", metavar="FILE", help="also write JSON to FILE")
     ap.add_argument("--out", metavar="FILE", help="write the main output to FILE instead of stdout")
     ap.add_argument("--only", default=",".join(CHECKS), help="comma list of checks: " + ",".join(CHECKS))
-    ap.add_argument("--rules", action="store_true", help="include the extracted rule inventory")
+    ap.add_argument("--rules", action="store_true",
+                    help="include the extracted rule inventory in the JSON output (--json / --json-out)")
+    ap.add_argument("--print-rules", action="store_true",
+                    help="also print the rule inventory as a markdown table (long; implies --rules)")
+    ap.add_argument("--include-disabled", action="store_true",
+                    help="pair rules from surfaces that never load (skillOverrides off); reported as info")
+    ap.add_argument("--schema", action="store_true", help="print the JSON layout and exit")
     ap.add_argument("--list", action="store_true", help="only list discovered surfaces")
     ap.add_argument("--no-user", action="store_true", help="skip ~/.claude/CLAUDE.md, ~/.claude/rules and user settings")
     ap.add_argument("--include", action="append", default=[], metavar="GLOB", help="extra files to audit (relative glob)")
@@ -1569,6 +1761,11 @@ def main(argv=None):
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
         pass
+    if args.schema:
+        print(SCHEMA.strip())
+        return 0
+    if args.print_rules:
+        args.rules = True
 
     root = Path(args.root).resolve()
     if not root.is_dir():
@@ -1582,6 +1779,7 @@ def main(argv=None):
     surfaces.sort(key=lambda s: (s.scope != "user", s.rank, s.rel))
     settings = load_settings(root, include_user=not args.no_user)
     mark_disabled(surfaces, settings)
+    mark_selected_style(surfaces, settings)
 
     if args.list:
         for s in surfaces:
@@ -1598,7 +1796,7 @@ def main(argv=None):
     if "placement" in only:
         check_placement(surfaces, F, root)
     if "conflicts" in only:
-        check_conflicts(surfaces, F, args.max_pairs)
+        check_conflicts(surfaces, F, args.max_pairs, include_disabled=args.include_disabled)
     if "enforcement" in only:
         check_enforcement(surfaces, F, settings, root)
     summary = summarize(surfaces, F)
@@ -1609,7 +1807,7 @@ def main(argv=None):
     if args.json:
         text = json.dumps(to_json(root, surfaces, F, summary, only, args.rules), indent=2, ensure_ascii=False)
     else:
-        text = render_md(root, surfaces, F, summary, only, args.rules)
+        text = render_md(root, surfaces, F, summary, only, True if args.print_rules else (None if args.rules else False))
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text + "\n")
